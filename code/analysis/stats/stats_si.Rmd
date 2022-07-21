@@ -1,0 +1,816 @@
+---
+title: "Stats - SI"
+output:
+  html_document:
+    toc: yes
+    self_contained: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    number_sections: False
+    highlight: pygments
+    theme: cosmo
+    code_folding: "hide"
+    df_print: paged
+    fig_caption: true
+  pdf_document:
+    toc: yes
+    fig_caption: true
+    latex_engine: xelatex
+fig.align: "center"
+header-includes:
+  - \usepackage{fontspec}
+  - \setmainfont{AgfaRotisSansSerif}
+email: koch@mpib-berlin.mpg.de
+---
+
+```{r setup, include=FALSE}
+# Knitr settings
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+packages = c("here",
+             "data.table",
+             "ggplot2",
+             "plyr",
+             "plotly",
+             "dplyr",
+             'viridis',
+             'stringr',
+             'lme4',
+             'emmeans',
+             'car',
+             'MASS',
+             'papeR',
+             'binhf',
+             'knitr',
+             'lemon',
+             'ggforce',
+             'gghalves')
+invisible(lapply(packages, require, character.only = TRUE))
+
+# Get git directory 
+base_path = here::here()
+
+# Load pre-written functions
+source_path = file.path(base_path, 'code', 'analysis', 'utils',
+                        fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$",
+                          full.names = TRUE, recursive = TRUE)
+invisible(lapply(source_files, function(x) source(x)))
+
+# Get color map
+color_map = GetColorMap()
+
+# Set ROIs to display
+roi_vec = names(color_map)[names(color_map) != 'Precentral R (M1)' &
+                           names(color_map) != 'Precentral (M1)']
+
+# Get participant information
+file = file.path(base_path, 'bids', 'participants.tsv')
+participants = data.table::fread(file,
+                                 header = TRUE,
+                                 sep = '\t',
+                                 na.strings = 'n/a',
+                                 check.names = FALSE)
+participants = Transform_participants_tsv(participants)
+participants = participants[participants$sequence == 'nav',]
+
+# Knitr settings
+knitr::opts_chunk$set(out.width="100%", fig.show="hold", fig.align="center")
+options(dplyr.summarise.inform=F)
+
+# Apply exclusion criteria to get excludes:
+# 1. Too many timeouts during feedback phase
+# 2. Not correctable pulse logging fluctuations
+# 3. Less than 1 event in any training set
+excl = GetExcludes(modality = 'raw',
+                   xval_split = 'fold',
+                   buffering = TRUE,
+                   reorganize = TRUE,
+                   within_session = FALSE,
+                   return_reasons = TRUE)
+excl_reason = excl$reason
+excl = excl$excl
+
+
+within_excl = GetExcludes(modality = 'raw',
+                          xval_split = 'sub_fold',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          within_session = TRUE,
+                          return_reasons = TRUE)
+within_excl_reason = within_excl$reason
+within_excl = within_excl$excl
+```
+
+---
+
+# Relationship between ROI size and classification accuracy
+
+```{r}
+# Load within-session classification accuracy
+data_acc_within = LoadAcc(base_path = base_path,
+                          training = 'raw',
+                          testing = 'raw',
+                          events = 'walk-fwd',
+                          mask = '*',
+                          clf = 'logreg',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          xval_split = 'sub_fold',
+                          within_session = TRUE,
+                          perm = FALSE,
+                          acc_across_folds = TRUE)
+data_acc_within = RenameROIs(data_acc_within)
+
+# Load number of voxels per mask
+path = file.path(base_path,
+          'derivatives',
+          'analysis',
+          'review',
+          'data_n_voxel.tsv',
+          fsep = .Platform$file.sep)
+data_nvoxel = data.table::fread(path, sep = '\t', na.strings = 'n/a', header = TRUE)
+data_nvoxel = RenameROIs(data_nvoxel)
+data_nvoxel$mask_index = as.character(data_nvoxel$mask_index)
+
+# Combine data
+data_acc_within$participant_id = as.factor(data_acc_within$participant_id)
+data_acc_within$mask_index = as.factor(data_acc_within$mask_index)
+data_nvoxel$participant_id = as.factor(data_nvoxel$participant_id)
+data_nvoxel$mask_index = as.factor(data_nvoxel$mask_index)
+data = data.table::merge.data.table(data_acc_within,
+                                    data_nvoxel,
+                                    by = c('participant_id', 'mask_index'),
+                                    all = TRUE)
+
+# Exclude participants
+data = data[!participant_id %in% within_excl] %>%
+  # Create plan column
+  .[, intervention_plan := intervention] %>%
+  # Exclude control condition
+  .[intervention_plan != 'C',] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Convert intervention to unblinded
+  .[intervention_plan == 'AB' & as.numeric(session) == 1, intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & as.numeric(session) == 2, intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & as.numeric(session) == 1, intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & as.numeric(session) == 2, intervention := 'L-DOPA']
+```
+
+## Number of voxels in each ROI?
+
+```{r}
+# n-voxels were equal in both sessions
+data_count = data[session == '1'] %>%
+  .[, .(mean_n_voxels = mean(n_voxels),
+        sd_n_voxels = sd(n_voxels)),
+    by = c('mask_index')]
+
+data_count
+```
+
+## Separate LMs for each ROI {.tabset}
+
+```{r}
+# Get average classification accuracy across sessions
+data_mean = data %>%
+  .[, .(mean_clf_acc = mean(clf_acc),
+        n_voxels = unique(n_voxels)),
+    by = c('participant_id', 'mask_index', 'group', 'intervention_plan')]
+```
+
+### EVC
+
+```{r}
+data_lm = data_mean[mask_index == 'EVC'] %>%
+  .[, ':='(z_mean_clf_acc = scale(mean_clf_acc),
+           z_n_voxels = scale(n_voxels))]
+m_evc = lm(data = data_lm,
+           z_mean_clf_acc ~ z_n_voxels)
+summary(m_evc)
+```
+
+### HC
+
+```{r}
+data_lm = data_mean[mask_index == 'HC'] %>%
+  .[, ':='(z_mean_clf_acc = scale(mean_clf_acc),
+           z_n_voxels = scale(n_voxels))]
+m_hc = lm(data = data_lm,
+           z_mean_clf_acc ~ z_n_voxels)
+summary(m_hc)
+```
+
+### RSC
+
+```{r}
+data_lm = data_mean[mask_index == 'Isthmus Cing. (RSC)'] %>%
+  .[, ':='(z_mean_clf_acc = scale(mean_clf_acc),
+           z_n_voxels = scale(n_voxels))]
+m_rsc = lm(data = data_lm,
+           z_mean_clf_acc ~ z_n_voxels)
+summary(m_rsc)
+```
+
+### Entorhinal
+
+```{r}
+data_lm = data_mean[mask_index == 'Entorhinal'] %>%
+  .[, ':='(z_mean_clf_acc = scale(mean_clf_acc),
+           z_n_voxels = scale(n_voxels))]
+m_ent = lm(data = data_lm,
+           z_mean_clf_acc ~ z_n_voxels)
+summary(m_ent)
+```
+
+### M1
+
+```{r}
+data_lm = data_mean[mask_index == 'Precentral L (M1)'] %>%
+  .[, ':='(z_mean_clf_acc = scale(mean_clf_acc),
+           z_n_voxels = scale(n_voxels))]
+m_m1 = lm(data = data_lm,
+           z_mean_clf_acc ~ z_n_voxels)
+summary(m_m1)
+```
+
+## EVC: age difference in decoding related to age difference in n voxel?
+
+### Is there an age difference in voxel count in EVC? {.tabset}
+
+#### Plot
+
+```{r}
+# For plotting of number of voxels per ROI we only need one session (since the
+# mask is the same in both sessions)
+data_plot = data[session == 1 & mask_index == 'EVC']
+
+dodge_width = 0.2
+
+# Plot n voxels per ROI for all participants
+ggplot(data = data_plot,
+       aes(x = group,
+           y = n_voxels,
+           color = group,
+           fill = group)) +
+  geom_half_violin(data = data_plot[group == 'older'],
+                   side = 'l',
+                   alpha = 0.5) +
+  geom_point(data = data_plot[group == 'older'],
+             position = position_nudge(x = dodge_width,
+                                       y = 0)) +
+  geom_boxplot(data = data_plot[group == 'older'],
+               outlier.shape = NA,
+               color = 'black',
+               width = dodge_width*0.5,
+               position = position_nudge(x = dodge_width/2,
+                                         y = 0)) +
+  stat_summary(data = data_plot[group == 'older'],
+               fun = 'mean',
+               geom = 'point',
+               shape = 23,
+               size = 3,
+               fill = 'white',
+               position = position_nudge(x = dodge_width/2,
+                                         y = 0)) +
+  geom_half_violin(data = data_plot[group == 'younger'],
+                   side = 'r',
+                   alpha = 0.5) +
+  geom_point(data = data_plot[group == 'younger'],
+             position = position_nudge(x = -dodge_width,
+                                       y = 0)) +
+  geom_boxplot(data = data_plot[group == 'younger'],
+               outlier.shape = NA,
+               color = 'black',
+               width = dodge_width*0.5,
+               position = position_nudge(x = -dodge_width/2,
+                                         y = 0)) +
+  stat_summary(data = data_plot[group == 'younger'],
+               fun = 'mean',
+               geom = 'point',
+               shape = 23,
+               size = 3,
+               fill = 'white',
+               position =  position_nudge(x = -dodge_width/2,
+                                          y = 0))
+```
+
+#### Stats
+
+```{r}
+t.test(data_plot[group == 'older']$n_voxels,
+       data_plot[group == 'younger']$n_voxels)
+```
+
+### Size-matched analysis {.tabset}
+
+```{r}
+# Data ranked by voxel number
+data_rank = data_mean[mask_index == 'EVC'] %>%
+  # Order from highest to lowest n voxels separate for each age group
+  .[order(rank(group), -rank(n_voxels)), ] %>%
+  # Add ranking as number variable
+  .[, rank := seq(length(n_voxels)),
+    by = c('group')]
+
+# prepare distance matrix
+data_dist_match = data.table()
+data_older = data_mean[mask_index == 'EVC' & group == 'older']
+data_younger_match = data_mean[mask_index == 'EVC' & group == 'younger']
+
+# Size matching by distance matrix
+# Create table of each younger participant with nested older adults 
+for(id in unique(data_older$participant_id)){
+  temp = data_older[participant_id == id,] %>%
+    .[rep(1, each = nrow(data_younger_match)),]
+  # Add nested id and voxels of all OAs for each YA
+  temp$match_id = data_younger_match$participant_id
+  temp$match_n_voxels = data_younger_match$n_voxels
+  
+  # Bind all YA
+  data_dist_match = rbind(data_dist_match, temp)
+}
+
+# Calculate distance between each YA with each OA
+data_dist_match = data_dist_match %>%
+  .[, ':='(dist_n_voxel_YmO = n_voxels - match_n_voxels,
+           abs_dist_n_voxel_YmO = abs(n_voxels - match_n_voxels))]
+
+# Allocate data table to hold subsample
+temp_matched_sample = data.table()
+data_dist_match_excl = data_dist_match
+
+# Start with highest OA and then work down
+OAs = unique(data_older[order(-rank(n_voxels))]$participant_id)
+
+# Select closest OA to current YA, then delete both from pool
+for(id_count in seq(length(OAs))){
+  
+  # Find OA with lowest abs dist
+  temp = data_dist_match_excl[participant_id == OAs[id_count], ] %>%
+    .[, .SD[which.min(abs_dist_n_voxel_YmO)]]
+  # Add identification variables for within sample and iterations
+  temp$sample = id_count
+  temp$stepwise_mean_dist = 0
+  
+  # Fuse iterations
+  temp_matched_sample = rbind(temp_matched_sample, temp)
+  temp_matched_sample[sample == id_count]$stepwise_mean_dist = mean(temp_matched_sample$dist_n_voxel_YmO)
+  
+  # Exclude current iteration from main data
+  data_dist_match_excl = data_dist_match_excl[participant_id != OAs[id_count] & match_id != temp$match_id,]
+  
+}
+
+# Sort columns for readability
+data.table::setcolorder(temp_matched_sample, c('sample',
+                                               'participant_id',
+                                               'n_voxels',
+                                               'match_id',
+                                               'match_n_voxels',
+                                               'dist_n_voxel_YmO',
+                                               'abs_dist_n_voxel_YmO',
+                                               'stepwise_mean_dist'))
+
+
+# Pool of 50 n-voxel-matched participants
+pool = c(temp_matched_sample[sample <= 25, ]$participant_id,
+         temp_matched_sample[sample <= 25, ]$match_id)
+```
+
+#### Plot: n voxels for matched pool
+
+```{r}
+data_plot = data_mean[participant_id %in% pool & mask_index == 'EVC',]
+
+dodge_width = 0.2
+
+# Plot n voxels per ROI for all participants
+ggplot(data = data_plot,
+       aes(x = group,
+           y = n_voxels,
+           color = group,
+           fill = group)) +
+  geom_half_violin(data = data_plot[group == 'older'],
+                   side = 'l',
+                   alpha = 0.5) +
+  geom_point(data = data_plot[group == 'older'],
+             position = position_nudge(x = dodge_width,
+                                       y = 0)) +
+  geom_boxplot(data = data_plot[group == 'older'],
+               outlier.shape = NA,
+               color = 'black',
+               width = dodge_width*0.5,
+               position = position_nudge(x = dodge_width/2,
+                                         y = 0)) +
+  stat_summary(data = data_plot[group == 'older'],
+               fun = 'mean',
+               geom = 'point',
+               shape = 23,
+               size = 3,
+               fill = 'white',
+               position = position_nudge(x = dodge_width/2,
+                                         y = 0)) +
+  geom_half_violin(data = data_plot[group == 'younger'],
+                   side = 'r',
+                   alpha = 0.5) +
+  geom_point(data = data_plot[group == 'younger'],
+             position = position_nudge(x = -dodge_width,
+                                       y = 0)) +
+  geom_boxplot(data = data_plot[group == 'younger'],
+               outlier.shape = NA,
+               color = 'black',
+               width = dodge_width*0.5,
+               position = position_nudge(x = -dodge_width/2,
+                                         y = 0)) +
+  stat_summary(data = data_plot[group == 'younger'],
+               fun = 'mean',
+               geom = 'point',
+               shape = 23,
+               size = 3,
+               fill = 'white',
+               position =  position_nudge(x = -dodge_width/2,
+                                          y = 0))
+```
+
+#### Stats: group difference n voxels for matched pool
+
+```{r}
+# Mean n voxels for whole data set
+mean_n_voxels = mean(data_mean[mask_index == 'EVC']$n_voxels)
+mean_n_voxels_older = mean(data_mean[mask_index == 'EVC' & group == 'older']$n_voxels)
+mean_n_voxels_younger = mean(data_mean[mask_index == 'EVC' & group == 'younger']$n_voxels)
+diff_mean_n_voxels = abs(mean_n_voxels_older - mean_n_voxels_younger)
+
+# Difference in mean n voxels between groups in matched pool
+mean_n_voxels_subsample_older = mean(data_plot[group == 'older']$n_voxels)
+mean_n_voxels_subsample_younger = mean(data_plot[group == 'younger']$n_voxels)
+diff_mean_n_voxels_subsample = abs(mean_n_voxels_subsample_older - mean_n_voxels_subsample_younger)
+
+# subsample-difference as proportion of previous difference
+perc_diff_subsample = diff_mean_n_voxels_subsample / diff_mean_n_voxels * 100
+
+# Test difference in n voxels between groups
+t.test(data_plot[group == 'older']$n_voxels,
+       data_plot[group == 'younger']$n_voxels)
+```
+
+#### Plot: clf accuracy for matched pool
+
+```{r}
+ggplot(data = data_plot,
+       aes(x = group,
+           y = mean_clf_acc,
+           fill = group,
+           color = group)) +
+  geom_point() +
+  geom_boxplot(outlier.shape = NA,
+               color = 'black') +
+  stat_summary(fun = 'mean',
+               geom = 'point',
+               shape = 23,
+               size = 3,
+               stroke = 1,
+               fill = 'white')
+```
+
+#### Stats: group difference clf accuracy for matched pool
+
+```{r}
+t.test(data_plot[group == 'older']$mean_clf_acc,
+       data_plot[group == 'younger']$mean_clf_acc)
+
+wilcox.test(data_plot[group == 'older']$mean_clf_acc,
+            data_plot[group == 'younger']$mean_clf_acc)
+```
+
+---
+
+# Classification accuracy in left motor cortex {.tabset}
+
+```{r}
+data_clf = LoadAcc(base_path = base_path,
+                   training = 'raw',
+                   testing = 'raw',
+                   events = 'walk-fwd',
+                   mask = '*',
+                   clf = 'logreg',
+                   buffering = FALSE,
+                   reorganize = TRUE,
+                   xval_split = 'sub_fold',
+                   within_session = TRUE,
+                   perm = FALSE,
+                   acc_across_folds = TRUE,
+                   SMOTE = FALSE)
+data_clf = data_clf %>%
+  RenameROIs(.) %>%
+  # Exclude participants
+  .[!participant_id %in% within_excl,] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Set up intervention analysis
+  .[,intervention_plan := intervention] %>%
+  .[intervention_plan != 'C',] %>%
+  .[intervention_plan == 'AB' & session == '1', intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & session == '2', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '1', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '2', intervention := 'L-DOPA']
+
+data_clf_perm = LoadAcc(base_path = base_path,
+                        training = 'raw',
+                        testing = 'raw',
+                        events = 'walk-fwd',
+                        mask = '*',
+                        clf = 'logreg',
+                        buffering = FALSE,
+                        reorganize = TRUE,
+                        xval_split = 'sub_fold',
+                        within_session = TRUE,
+                        perm = TRUE,
+                        acc_across_folds = TRUE,
+                        SMOTE = FALSE)
+data_clf_perm = data_clf_perm %>%
+  RenameROIs(.) %>%
+  # Exclude participants
+  .[!participant_id %in% within_excl,] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Set up intervention analysis
+  .[,intervention_plan := intervention] %>%
+  .[intervention_plan != 'C',] %>%
+  .[intervention_plan == 'AB' & session == '1', intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & session == '2', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '1', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '2', intervention := 'L-DOPA']
+
+# Average decoding across sessions
+data_clf_mean = data_clf %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'group')]
+
+data_clf_perm_mean = data_clf_perm %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'group', 'i_perm')]
+
+data_permutation = data_clf_mean %>%
+  # Duplicate clf column to append to permutation without column name conflicts
+  .[, real_clf_mean := mean_clf_acc]
+data_permutation_cutoff = data_clf_perm_mean %>%
+  # Add mean classification accuracy
+  data.table::merge.data.table(., data_permutation,
+                               by = c('mask_index', 'group')) %>%
+  # Eliminate column duplicates through merging
+  .[, mean_clf_acc := mean_clf_acc.x] %>%
+  .[, c('mean_clf_acc.x', 'mean_clf_acc.y') := NULL] %>%
+  # How many of the permutation results are higher than real accuracy?
+  .[, perm_higher := mean_clf_acc > real_clf_mean,
+    by = c('mask_index', 'group', 'i_perm')] %>%
+  # Get two-sided cut-off for above chance and p-value of permutation test
+  .[, .(cut_off = quantile(mean_clf_acc, 0.975),
+        mean_clf_acc = unique(real_clf_mean),
+        p = sum(perm_higher) / .N),
+    by = c('mask_index', 'group')]
+```
+
+## Permutation test: within groups
+
+```{r}
+table_cutoff = data_permutation_cutoff[mask_index == 'Precentral L (M1)'] %>%
+  .[, p_adj_holm := p.adjust(p, method = 'holm')]
+table_cutoff[, c('mask_index', 'group', 'mean_clf_acc', 'p', 'p_adj_holm')]
+```
+
+## Permutation test: within age groups and intervention
+
+```{r}
+# Average decoding across sessions and groups
+data_clf_mean = data_clf %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'group', 'intervention')]
+
+data_clf_perm_mean = data_clf_perm %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'group', 'intervention', 'i_perm')]
+
+data_permutation = data_clf_mean %>%
+  # Duplicate clf column to append to permutation without column name conflicts
+  .[, real_clf_mean := mean_clf_acc]
+data_permutation_cutoff = data_clf_perm_mean %>%
+  # Add mean classification accuracy
+  data.table::merge.data.table(., data_permutation,
+                               by = c('mask_index', 'group', 'intervention')) %>%
+  # Eliminate column duplicates through merging
+  .[, mean_clf_acc := mean_clf_acc.x] %>%
+  .[, c('mean_clf_acc.x', 'mean_clf_acc.y') := NULL] %>%
+  # How many of the permutation results are higher than real accuracy?
+  .[, perm_higher := mean_clf_acc > real_clf_mean,
+    by = c('mask_index', 'group', 'intervention', 'i_perm')] %>%
+  # Get two-sided cut-off for above chance and p-value of permutation test
+  .[, .(cut_off = quantile(mean_clf_acc, 0.975),
+        mean_clf_acc = unique(real_clf_mean),
+        p = sum(perm_higher) / .N),
+    by = c('mask_index', 'group', 'intervention')]
+
+table_cutoff = data_permutation_cutoff[mask_index == 'Precentral L (M1)'] %>%
+  .[, p_adj_holm := p.adjust(p, method = 'holm')]
+table_cutoff[, c('mask_index', 'group', 'intervention', 'mean_clf_acc', 'p', 'p_adj_holm')]
+```
+
+## Permutation test: differences between conditions
+
+```{r}
+# Get average difference between both sessions
+data_clf_diff = data_clf %>%
+  .[intervention == 'L-DOPA', intervention := 'A'] %>%
+  .[intervention == 'Placebo', intervention := 'B'] %>%
+  data.table::dcast(participant_id + mask_index ~ paste0('clf_acc_', intervention), value.var = 'clf_acc') %>%
+  .[, clf_acc_AmB := clf_acc_A - clf_acc_B] %>%
+  .[, .(mean_clf_acc_AmB = mean(clf_acc_AmB)),
+    by = 'mask_index']
+
+# Get average difference for each permutation (CAVEAT: Permutations were independent of each other)
+data_clf_diff_perm = data_clf_perm %>%
+  .[intervention == 'L-DOPA', intervention := 'A'] %>%
+  .[intervention == 'Placebo', intervention := 'B'] %>%
+  data.table::dcast(i_perm + participant_id + mask_index ~ paste0('clf_acc_', intervention), value.var = 'clf_acc') %>%
+  .[, clf_acc_AmB := clf_acc_A - clf_acc_B] %>%
+  .[, .(mean_clf_acc_AmB = mean(clf_acc_AmB)),
+    by = c('i_perm', 'mask_index')]
+
+# Get two-sided cut-off (97.5th percentile) and p-value for one-sided permutation test
+data_clf_diff_cutoff = data_clf_diff_perm %>%
+  # Add mean classification accuracy
+  data.table::merge.data.table(., data_clf_diff,
+                               by = c('mask_index')) %>%
+  # Eliminate column duplicates through merging
+  .[, mean_clf_acc_AmB := mean_clf_acc_AmB.x] %>%
+  .[, real_mean_clf_acc_AmB := mean_clf_acc_AmB.y] %>%
+  .[, c('mean_clf_acc_AmB.x', 'mean_clf_acc_AmB.y') := NULL] %>%
+  # How many of the permutation results are higher than real accuracy?
+  .[, perm_higher := mean_clf_acc_AmB > real_mean_clf_acc_AmB,
+    by = c('mask_index', 'i_perm')] %>%
+  # Get two-sided cut-off for above chance and p-value of permutation test
+  .[, .(cut_off = quantile(mean_clf_acc_AmB, 0.975),
+        mean_clf_acc_AmB = unique(real_mean_clf_acc_AmB),
+        p = sum(perm_higher) / .N),
+    by = c('mask_index')]
+
+# Plot real value against permutation
+ggplot(data = data_clf_diff_perm[mask_index == 'Precentral L (M1)'],
+       aes(x = mask_index,
+           y = mean_clf_acc_AmB)) +
+  geom_violin(draw_quantiles = c(.25, .5, .75, .975),
+              fill = 'white') +
+  geom_point(data = data_clf_diff[mask_index == 'Precentral L (M1)'],
+             shape = 23,
+             stroke = 1,
+             size = 3,
+             fill = 'white') +
+  geom_text(data = data_clf_diff_cutoff[mask_index == 'Precentral L (M1)'],
+            aes(y = .03,
+                label = stringr::str_c('p = ', as.character(p))))
+```
+
+---
+
+# Number of classifier examples between sessions and age groups
+
+```{r}
+# Load all predictions for each event
+pred_table = LoadPred(base_path = base_path,
+                      training = 'raw',
+                      testing = 'raw',
+                      events = 'walk-fwd',
+                      mask = '*',
+                      clf = 'logreg',
+                      buffering = FALSE,
+                      reorganize = TRUE,
+                      xval_split = 'sub_fold',
+                      within_session = TRUE,
+                      print_progress = FALSE)
+data_n_events = pred_table %>%
+  RenameROIs(.) %>%
+  # Exclude participants
+  .[!participant_id %in% within_excl,] %>%
+  # Set up intervention analysis
+  .[,intervention_plan := intervention] %>%
+  .[intervention_plan != 'C',] %>%
+  .[intervention_plan == 'AB' & session == '1', intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & session == '2', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '1', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '2', intervention := 'L-DOPA'] %>%
+  # Take only one entry of conf matrix (single entry for each TR)
+  .[variable == '0'] %>%
+  # Only take one TR because because events dont differ for masks
+  .[mask_index == 'EVC',] %>%
+  # Get count of events of each condition
+  .[, .(n_events = length(event)),
+    by = c('participant_id', 'age', 'sex', 'group', 'intervention_plan', 'session', 'intervention', 'x_val_split', 'fold', 'event_type')] %>%
+  .[order(rank(participant_id), rank(session), rank(fold), rank(event_type)),] %>%
+  # Assure data types
+  .[, c('participant_id', 'age', 'group', 'intervention_plan', 'session', 'intervention', 'x_val_split', 'event_type') := lapply(.SD, as.factor),
+    .SDcols = c('participant_id', 'age', 'group', 'intervention_plan', 'session', 'intervention', 'x_val_split', 'event_type')]
+  
+# Aggregate events by direction
+data_n_events_agg = data_n_events %>%
+  .[, .(n_events = sum(n_events)),
+    by = c('participant_id', 'age', 'sex', 'group', 'intervention_plan', 'session', 'intervention', 'x_val_split', 'event_type')]
+
+# Aggegrate events across directions
+data_n_events_agg_all = data_n_events %>%
+  .[, .(n_events = sum(n_events)),
+    by = c('participant_id', 'age', 'sex', 'group', 'intervention_plan', 'session', 'intervention', 'x_val_split')]
+
+```
+
+## LMM: Total number of events {.tabset}
+
+### By session and age group
+
+```{r}
+# With session
+m1 = lme4::lmer(n_events ~ group * session + (1 | participant_id),
+                data = data_n_events_agg_all)
+Anova(m1)
+```
+
+#### Main: Session
+
+```{r}
+emmeans(m1, pairwise ~ session)
+```
+
+### By intervention and age group
+
+```{r}
+# With intervention
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg_all)
+Anova(m1)
+```
+
+
+## LMM: Within direction bins (intervention) {.tabset}
+
+### Bin 1
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '1'])
+Anova(m1)
+```
+
+### Bin 2
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '2'])
+Anova(m1)
+```
+
+```{r}
+emmeans::emmeans(m1,
+                 pairwise ~ group)
+```
+
+### Bin 3
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '3'])
+Anova(m1)
+```
+
+### Bin 4
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '4'])
+Anova(m1)
+```
+
+### Bin 5
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '5'])
+Anova(m1)
+```
+
+```{r}
+emmeans::emmeans(m1,
+                 pairwise ~ group)
+```
+
+### Bin 6
+
+```{r}
+m1 = lme4::lmer(n_events ~ group * intervention + (1 | participant_id),
+                data = data_n_events_agg[event_type == '6'])
+Anova(m1)
+```

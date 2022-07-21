@@ -1,0 +1,1506 @@
+---
+title: "Figures"
+output:
+  html_document:
+    toc: yes
+    self_contained: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    number_sections: False
+    highlight: pygments
+    theme: cosmo
+    code_folding: "hide"
+    df_print: paged
+    fig_caption: true
+  pdf_document:
+    toc: yes
+    fig_caption: true
+    latex_engine: xelatex
+fig.align: "center"
+header-includes:
+  - \usepackage{fontspec}
+  - \setmainfont{AgfaRotisSansSerif}
+email: koch@mpib-berlin.mpg.de
+---
+
+
+# Setup
+
+```{r, warning=FALSE, message=FALSE}
+packages = c("here",
+             "data.table",
+             "ggplot2",
+             "cowplot",
+             "plyr",
+             "plotly",
+             "dplyr",
+             'viridis',
+             'stringr',
+             'lme4',
+             'emmeans',
+             'car',
+             'MASS',
+             'papeR',
+             'binhf',
+             'knitr',
+             'lemon',
+             'ggExtra',
+             'ggbeeswarm',
+             'gghalves',
+             'sdamr')
+invisible(lapply(packages, require, character.only = TRUE))
+
+# Get git directory
+base_path = here::here()
+
+# Load pre-written functions
+source_path = file.path(base_path, 'code', 'analysis', 'utils',
+                        fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$",
+                          full.names = TRUE, recursive = TRUE)
+invisible(lapply(source_files, function(x) source(x)))
+
+# Get location to save plots
+savedir = file.path(base_path, 'derivatives', 'analysis', 'figures', fsep = .Platform$file.sep)
+
+# Get color map
+color_map = GetColorMap(figure_names = TRUE)
+#color_map = setNames(color_map, c('Vis.\nCtx.', names(color_map[2:length(color_map)])))
+
+# Set ROIs to display
+roi_vec = names(color_map)[names(color_map) != 'Precentral R (M1)' &
+                           names(color_map) != 'Precentral (M1)']
+
+# Get participant information
+file = file.path(base_path, 'bids', 'participants.tsv')
+participants = read.table(file, header = TRUE, sep = '\t', na.strings = 'n/a', check.names = FALSE)
+participants = Transform_participants_tsv(participants)
+participants = participants[participants$sequence == 'nav',]
+
+# Knitr settings
+knitr::opts_chunk$set(out.width="100%", fig.show="hold", fig.align="center")
+options(dplyr.summarise.inform=F)
+
+# Apply exclusion criteria to get excludes:
+# 
+# 1. Too many timeouts during feedback phase
+# 2. Not correctable pulse logging fluctuations
+# 3. Less than 1 event in any training set
+excl = GetExcludes(modality = 'raw',
+                   xval_split = 'fold',
+                   buffering = TRUE,
+                   reorganize = TRUE,
+                   within_session = FALSE,
+                   return_reasons = TRUE)
+excl_reason = excl$reason
+excl = excl$excl
+
+within_excl = GetExcludes(modality = 'raw',
+                          xval_split = 'sub_fold',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          within_session = TRUE,
+                          return_reasons = TRUE)
+within_excl_reason = within_excl$reason
+within_excl = within_excl$excl
+
+# Function to rename ROIs for plots
+MasknamesForPlots = function(data){
+  data$mask_index = as.character(data$mask_index)
+  data$mask_index[data$mask_index == 'Entorhinal'] = 'Entorhinal\nCortex'
+  data$mask_index[data$mask_index == 'EVC'] = 'EVC'
+  data$mask_index[data$mask_index == 'Isthmus Cing. (RSC)'] = 'RSC'
+  data$mask_index[data$mask_index == 'HC'] = 'Hippocampus'
+  data$mask_index[data$mask_index == 'Precentral L (M1)'] = 'Left Motor'
+
+  data$mask_index = as.factor(data$mask_index)
+
+  return(data)
+}
+
+# Standards for font sizes
+strip_text_size = 15
+axis_title_size = 15
+axis_text_size = 12
+```
+
+Load data
+
+```{r}
+raw_acc_int = LoadAcc(base_path = base_path,
+                          training = 'raw',
+                          testing = 'raw',
+                          events = 'walk-fwd',
+                          mask = '*',
+                          clf = 'logreg',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          xval_split = 'sub_fold',
+                          within_session = TRUE,
+                          perm = FALSE,
+                          acc_across_folds = TRUE)
+raw_acc_int = RenameROIs(raw_acc_int) %>%
+  .[mask_index != 'MTL']
+
+raw_acc_int_perm = LoadAcc(base_path = base_path,
+                          training = 'raw',
+                          testing = 'raw',
+                          events = 'walk-fwd',
+                          mask = '*',
+                          clf = 'logreg',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          xval_split = 'sub_fold',
+                          within_session = TRUE,
+                          perm = TRUE,
+                          acc_across_folds = TRUE)
+raw_acc_int_perm = RenameROIs(raw_acc_int_perm) %>%
+  .[mask_index != 'MTL']
+
+# Apply exclusion criteria to get excludes:
+#
+# 1. Too many timeouts during feedback phase
+# 2. Not correctable pulse logging fluctuations
+# 3. Less than 1 event in any training set
+within_excl = GetExcludes(modality = 'raw',
+                          xval_split = 'sub_fold',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          within_session = TRUE,
+                          return_reasons = TRUE)
+within_excl_reason = within_excl$reason
+within_excl = within_excl$excl
+```
+
+---
+
+# Figure 2
+
+```{r}
+# Load performance
+file = file.path(base_path, 'derivatives', 'analysis', 'behavioral',
+                 'performance.tsv',
+                 fsep = .Platform$file.sep)
+data_perf = read.table(file, header = TRUE, sep = '\t', na.strings = 'n/a')
+
+# Load performance at chance
+file = file.path(base_path, 'derivatives', 'analysis', 'behavioral',
+                 'chance_performance.tsv',
+                 fsep = .Platform$file.sep)
+data_perm = read.table(file, header = TRUE, sep = '\t', na.strings = 'n/a')
+
+# Preprocess performance
+data_behav_avg = data_perf
+data_behav_avg$error[data_behav_avg$time_out] = NA
+data_behav_avg = data_behav_avg %>%
+  dplyr::rename(participant_id = subject) %>%
+  dplyr::filter(!participant_id %in% excl,
+                intervention != 'C') %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(group = unlist(strsplit(participant_id, '-'))[2]) %>%
+  dplyr::mutate(group = substr(group, 1, nchar(group) - 3)) %>%
+  dplyr::group_by(participant_id, group, session, intervention, trial) %>%
+  dplyr::summarise(avg_error = mean(error, na.rm = TRUE),
+                   n_time_out = sum(is.na(error)))
+
+# Preprocess chance performance
+data_behav_perm_avg = data_perm
+data_behav_perm_avg$error[data_behav_perm_avg$time_out] = NA
+data_behav_perm_avg = data_behav_perm_avg %>%
+  dplyr::rename(participant_id = subject) %>%
+  dplyr::filter(!participant_id %in% excl,
+                intervention != 'C') %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(group = unlist(strsplit(participant_id, '-'))[2]) %>%
+  dplyr::mutate(group = substr(group, 1, nchar(group) - 3)) %>%
+  dplyr::group_by(participant_id, group, session, intervention, trial, i_perm) %>%
+  dplyr::summarise(avg_error = mean(error_perm, na.rm = TRUE))
+```
+
+```{r, fig.width=6, fig.height=4}
+# Standards for font sizes
+strip_text_size = 12
+axis_title_size = 11
+axis_text_size = 10
+
+# Plot behavior
+data_plot = data_behav_avg
+
+# Rename factor levels
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older adults', 'Younger adults')
+data_plot$intervention = as.factor(data_plot$intervention)
+levels(data_plot$intervention) = c('L-DOPA', 'Placebo')
+
+# Process perm for plot (shown as 0 trial)
+data_plot_perm = data_behav_perm_avg %>%
+  dplyr::group_by(session, group, intervention, trial, i_perm) %>%
+  dplyr::filter(trial == 1) %>%
+  dplyr::summarise(avg_error = mean(avg_error))
+data_plot_perm$trial = 0
+
+# Rename factor levels
+data_plot_perm$group = as.factor(data_plot_perm$group)
+levels(data_plot_perm$group) = c('Older adults', 'Younger adults')
+data_plot_perm$intervention = as.factor(data_plot_perm$intervention)
+levels(data_plot_perm$intervention) = c('L-DOPA', 'Placebo')
+
+# Plot
+p_behav = ggplot(data = data_plot, aes(x = trial,
+                                       y = avg_error,
+                                       linetype = intervention,
+                                       fill = intervention)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_half_violin(data = subset(data_plot_perm, intervention == 'L-DOPA'),
+                   side = 'l',
+                   position = position_nudge(x = -0.07),
+                   show.legend = FALSE) +
+  geom_half_violin(data = subset(data_plot_perm, intervention == 'Placebo'),
+                   side = 'r',
+                   position = position_nudge(x = 0.07),
+                   show.legend = FALSE) +
+  geom_point(data = data_plot[data_plot$intervention == 'L-DOPA', ], size = 0.6,
+             alpha = 0.3,
+             shape = 21,
+             position = position_nudge(x = -0.07)) +
+  geom_point(data = data_plot[data_plot$intervention == 'Placebo', ], size = 0.6,
+             alpha = 0.3,
+             shape = 21,
+             position = position_nudge(x = 0.07)) +
+  stat_summary(fun = 'mean', geom = 'line', size = 1, aes(group = intervention),
+               color = 'black') +
+  stat_summary(fun = 'mean', geom = 'point', shape = 21, size = 3, color = 'black') +
+  scale_fill_manual(values = c('white', 'black')) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  scale_x_continuous(breaks = c(0, seq(6)), labels = c('Chance', seq(6))) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  labs(x = 'Trial', y = 'Average distance error') +
+  facet_grid(. ~ group, switch = 'y') +
+  theme(strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        strip.placement = 'outside',
+        strip.text.x = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.text.y.left = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        axis.title.x = element_text(size = axis_title_size),
+        axis.title.y = element_text(size = axis_title_size),
+        axis.text = element_text(size = axis_text_size),
+        plot.margin = unit(c(0,10,0,0), "pt"),
+        legend.position = c(0.25, 0.1),
+        legend.background = element_rect(
+          color = 'black'),
+        legend.title = element_blank(),
+        legend.key.width = unit(20, units = 'pt'),
+        #legend.key.height = unit(5, units = 'pt'),
+        #legend.spacing.y = unit(0, units = 'in'),
+        legend.text = element_text(size = 8, margin = margin(t = 5, b = 5, unit = 'pt')),
+        legend.margin = margin(t = 2, r = 5, b = 2, l = 5, unit = 'pt'),
+        legend.justification = 'center',
+        legend.direction = 'horizontal',
+        panel.grid = element_blank())
+
+# Display plot
+p_behav
+```
+
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'fig02.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_behav,
+       device = 'pdf',
+       width = 6,
+       height = 4)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'fig02.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_behav,
+       device = 'png',
+       width = 6,
+       height = 4)
+```
+
+
+---
+
+# Figure 3
+
+```{r, fig.height=8, fig.width=11}
+# Standards for font sizes
+strip_text_size = 15
+axis_title_size = 15
+axis_text_size = 12
+
+# Get classification accuracy data
+raw_acc_int = raw_acc_int %>%
+  dplyr::filter(intervention != 'C',
+                !participant_id %in% within_excl) %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(manipulation = unlist(str_split(as.character(intervention), ''))[as.numeric(session)]) %>%
+  as.data.table()
+
+# Get classification accuracy permutation
+raw_acc_int_perm = raw_acc_int_perm %>%
+  dplyr::filter(intervention != 'C',
+                !participant_id %in% within_excl) %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(manipulation = unlist(str_split(as.character(intervention), ''))[as.numeric(session)]) %>%
+  as.data.table()
+
+# Set mask names for plots
+data_plot = raw_acc_int %>%
+  dplyr::filter(intervention != 'C') %>%
+  MasknamesForPlots()
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC',  'Hippocampus', 'Entorhinal\nCortex', 'Left Motor'))
+
+# Select masks
+data_plot = data_plot %>%
+  dplyr::filter(mask_index %in% c('EVC', 'RSC',  'Hippocampus', 'Left Motor'))
+
+# Rename intervention levels
+data_plot$manipulation[data_plot$manipulation == 'A'] = 'L-DOPA'
+data_plot$manipulation[data_plot$manipulation == 'B'] = 'Placebo'
+data_plot$manipulation = factor(data_plot$manipulation, levels = c('Placebo', 'L-DOPA'))
+
+# Rename groups
+data_plot$group[data_plot$group == 'older'] = 'Older\nadults'
+data_plot$group[data_plot$group == 'younger'] = 'Younger\nadults'
+data_plot$group = factor(data_plot$group)
+
+# Plot decoding accuracy by intervention
+p_int_dec = ggplot(data = data_plot, aes(x = manipulation, y = clf_acc, fill = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), alpha = 0.5) +
+  geom_jitter(width = 0.1,
+              height = 0,
+              size = 0.5,
+              alpha = 0.5) +
+  geom_hline(yintercept = 1/6, linetype = 'dashed', size = 0.75) +
+  stat_summary(fun = 'mean', geom = 'point', size = 3, shape = 23, fill = 'white', stroke = 1) +
+  coord_capped_flip(left='both', bottom='both', expand = TRUE) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(breaks = sort(c(seq(0.1, 0.4, by = 0.1), 1/6)),
+                     labels = c('.10', 'Chance', '.20', '.30', '.40')) +
+  labs(x = 'ROI', y = 'Decoding accuracy') +
+  facet_grid(mask_index ~ ., switch = 'both') +
+  theme(legend.position = 'none',
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = axis_title_size),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(size = axis_text_size,
+          angle = 45,
+          hjust = 1,
+          vjust = 1),
+        axis.text.y = element_text(hjust = 0.5, size = axis_text_size),
+        plot.margin = unit(c(0,10,10,10), "pt"),
+        strip.placement = 'outside',
+        strip.text.y.left = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        panel.grid = element_blank())
+
+# Plot decoding accuracy by age
+data_plot = raw_acc_int %>%
+  dplyr::filter(intervention != 'C') %>%
+  MasknamesForPlots()
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC',  'Hippocampus', 'Entorhinal\nCortex', 'Left Motor'))
+
+# Select masks
+data_plot = data_plot %>%
+  dplyr::filter(mask_index %in% c('EVC', 'RSC',  'Hippocampus'))
+
+# Rename intervention levels
+data_plot$manipulation[data_plot$manipulation == 'A'] = 'L-DOPA'
+data_plot$manipulation[data_plot$manipulation == 'B'] = 'Placebo'
+data_plot$manipulation = factor(data_plot$manipulation, levels = c('Placebo', 'L-DOPA'))
+
+# Average across intervention
+data_plot = data_plot %>%
+  .[, .(clf_acc = mean(clf_acc)),
+    by = c('participant_id', 'group', 'mask_index')]
+
+# Rename groups
+data_plot$group[data_plot$group == 'older'] = 'Older'
+data_plot$group[data_plot$group == 'younger'] = 'Younger'
+data_plot$group = factor(data_plot$group)
+
+# Get SEM
+data_plot_mean = data_plot %>%
+  .[, .(clf_acc = mean(clf_acc),
+        sem = sd(clf_acc)/sqrt(length(clf_acc)),
+        n = length(clf_acc),
+        sqrt_n = sqrt(length(clf_acc))),
+    by = c('group', 'mask_index')]
+
+# Plot
+p_group_dec = ggplot(data = data_plot,
+                     aes(x = group,
+                         y = clf_acc,
+                         fill = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_hline(yintercept = 1/6 - 1/6,
+             linetype = 'solid',
+             color = 'black',
+             size = 0.4) +
+  geom_col(data = data_plot_mean[group == 'Older'],
+           aes(y = clf_acc - 1/6),
+           color = 'black',
+           size = 0.3,
+           width = 0.6,
+           alpha = 0.4,
+           position = position_nudge(y = 0,
+                                     x = 0.15)) +
+  geom_col(data = data_plot_mean[group == 'Younger'],
+           aes(y = clf_acc - 1/6),
+           color = 'black',
+           size = 0.3,
+           width = 0.6,
+           alpha = 1,
+           position = position_nudge(y = 0,
+                                     x = -0.15)) +
+  geom_point(data = data_plot[group == 'Older'],
+             aes(y = clf_acc - 1/6),
+             shape = 21,
+             size = 0.8,
+             alpha = 0.3,
+             color = 'black',
+             fill = 'grey',
+             position = sdamr::position_jitternudge(jitter.width = 0.15,
+                                                    jitter.height = 0,
+                                                    nudge.x = 0.15,
+                                                    nudge.y = 0)) +
+  geom_point(data = data_plot[group == 'Younger'],
+             aes(y = clf_acc - 1/6),
+             shape = 21,
+             size = 0.8,
+             alpha = 0.3,
+             color = 'black',
+             fill = 'grey',
+             position = sdamr::position_jitternudge(jitter.width = 0.15,
+                                                    jitter.height = 0,
+                                                    nudge.x = -0.15,
+                                                    nudge.y = 0)) +
+  geom_linerange(data = data_plot_mean[group == 'Older'],
+                 aes(ymin = clf_acc - 1/6 - sem, ymax = clf_acc - 1/6 + sem),
+                 position = position_nudge(0.15),
+                 size = 0.75) +
+  geom_linerange(data = data_plot_mean[group == 'Younger'],
+                 aes(ymin = clf_acc - 1/6 - sem, ymax = clf_acc - 1/6 + sem),
+                 position = position_nudge(-0.15),
+                 size = 0.75) +
+  coord_capped_cart(left='both', bottom='both', expand = TRUE) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(limits= c(min(data_plot$clf_acc) - 1/6, max(data_plot$clf_acc) - 1/6),
+                     breaks = sort(c(seq(0.2,.35, by = .05), 1/6, .10)) - 1/6,
+                     labels = c('.10', 'Chance', '.20','.25', '.30', '.35')) +
+  labs(x = 'ROI', y = 'Decoding accuracy') +
+  facet_grid(. ~ mask_index) +
+  theme(legend.position = 'none',
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = axis_title_size),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        axis.text.y = element_text(hjust = 1, size = axis_text_size+2),
+        axis.text.x = element_text(hjust = 0.5, size = axis_text_size+2),
+        plot.margin = unit(c(0,10,10,10), "pt"),
+        strip.placement = 'outside',
+        strip.text = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        panel.grid = element_blank())
+
+# Plot accuracies vs permutation distribution
+data_plot = raw_acc_int %>%
+  .[intervention != 'C',] %>%
+  MasknamesForPlots() %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'manipulation')]
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC',  'Hippocampus', 'Entorhinal\nCortex', 'Left Motor'))
+
+# Select masks
+data_plot = data_plot %>%
+  dplyr::filter(mask_index %in% c('EVC', 'RSC',  'Hippocampus'))
+
+# Rename intervention levels
+data_plot$manipulation[data_plot$manipulation == 'A'] = 'L-DOPA'
+data_plot$manipulation[data_plot$manipulation == 'B'] = 'Placebo'
+data_plot$manipulation = factor(data_plot$manipulation, levels = c('Placebo', 'L-DOPA'))
+
+# Average classification accuracy within mask and intervention
+data_plot_perm = raw_acc_int_perm %>%
+  .[intervention != 'C',] %>%
+  MasknamesForPlots() %>%
+  .[,manipulation := unlist(str_split(intervention, ''))[as.numeric(session)],
+    by = c('participant_id', 'i_perm', 'session')] %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('i_perm', 'mask_index', 'manipulation')]
+data_plot_perm$mask_index = factor(data_plot_perm$mask_index, levels = c('EVC', 'RSC',  'Hippocampus', 'Entorhinal\nCortex', 'Left Motor'))
+
+# Select masks
+data_plot_perm = data_plot_perm %>%
+  dplyr::filter(mask_index %in% c('EVC', 'RSC',  'Hippocampus'))
+
+# Rename intervention levels
+data_plot_perm$manipulation[data_plot_perm$manipulation == 'A'] = 'L-DOPA'
+data_plot_perm$manipulation[data_plot_perm$manipulation == 'B'] = 'Placebo'
+data_plot_perm$manipulation = factor(data_plot_perm$manipulation, levels = c('Placebo', 'L-DOPA'))
+
+# Plot
+p_int_perm = ggplot(data = data_plot_perm,
+                    aes(x = manipulation,
+                        y = mean_clf_acc,
+                        color = mask_index,
+                        fill = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_hline(linetype = 'dashed',
+             yintercept = 1/6,
+             color = 'black',
+             size = 0.75) +
+  gghalves::geom_half_violin(width = 1.4,
+                             alpha = 0.5,
+                             side = 'r',
+                             color = 'black',
+                             size = 0.2,
+                             position = position_nudge(x = -0.2,
+                                                       y = 0)) +
+  geom_point(size = 0.2,
+             alpha = 0.1,
+             color = 'black',
+             position = sdamr::position_jitternudge(nudge.x = -0.3,
+                                                    nudge.y = 0,
+                                                    jitter.width = 0.1,
+                                                    jitter.height = 0)) +
+  geom_point(data = data_plot,
+             shape = 23,
+             size = 3,
+             stroke = 1,
+             fill = 'white',
+             color = 'black') +
+  facet_grid(.~mask_index) +
+  coord_capped_flip(left='both', bottom='both', expand = TRUE) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(breaks = sort(c(seq(.16, .24, by = .02), 1/6)),
+                     labels = c('.16', 'Chance', '.18', '.20', '.22', '.24')) +
+  labs(x = 'ROI', y = 'Decoding accuracy') +
+  facet_grid(mask_index ~ ., switch = 'both') +
+  theme(legend.position = 'none',
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = axis_title_size),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(size = axis_text_size,
+                                   angle = 45,
+                                   hjust = 1,
+                                   vjust = 1),
+        axis.text.y = element_text(hjust = 0.5, size = axis_text_size),
+        plot.margin = unit(c(0,10,10,10), "pt"),
+        strip.placement = 'outside',
+        strip.text.y.left = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        panel.grid = element_blank())
+
+# Plot difference between interventions in RSC and HC
+data_plot = raw_acc_int %>%
+  MasknamesForPlots() %>%
+  dplyr::filter(intervention != 'C',
+                mask_index %in% c('Hippocampus', 'RSC')) %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + mask_index ~ manipulation, value.var = c('clf_acc')) %>%
+  dplyr::mutate(diff_clf = A-B) %>%
+  dplyr::group_by(group, mask_index) %>%
+  dplyr::summarize(mean_diff_clf = mean(diff_clf),
+                   sem = sd(diff_clf)/sqrt(length(diff_clf)),
+                   n = length(diff_clf)) %>%
+  as.data.table(.)
+
+# Rename age groups
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('RSC', 'Hippocampus'))
+data_plot$group[data_plot$group == 'older'] = 'Older'
+data_plot$group[data_plot$group == 'younger'] = 'Younger'
+data_plot$group = factor(data_plot$group)
+
+# Plot
+p_int_age = ggplot(data = data_plot, aes(x = group, y = mean_diff_clf, fill = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_col(data = data_plot[group == 'Older'],
+           color = 'black',
+           size = 0.3,
+           width = 0.6,
+           alpha = 0.4,
+           position = position_nudge(y = 0,
+                                     x = 0.15)) +
+  geom_col(data = data_plot[group == 'Younger'],
+           color = 'black',
+           size = 0.3,
+           width = 0.6,
+           alpha = 1,
+           position = position_nudge(y = 0,
+                                     x = -0.15)) +
+  geom_linerange(data = data_plot[group == 'Older'],
+                 aes(ymin = mean_diff_clf - sem, ymax = mean_diff_clf + sem),
+                 position = position_nudge(0.15),
+                 size = 0.75) +
+  geom_linerange(data = data_plot[group == 'Younger'],
+                 aes(ymin = mean_diff_clf - sem, ymax = mean_diff_clf + sem),
+                 position = position_nudge(-0.15),
+                 size = 0.75) +
+  labs(y = 'Difference in decodability\nbetween interventions\n(L-DOPA - Placebo)') +
+  facet_grid(. ~ mask_index) +
+  coord_capped_cart(left='both', bottom='both', expand = TRUE) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(breaks = seq(-0.14, 0.14, length.out = 5),
+                     labels = c('-.14', '-.07', '0', '.07', '.14')) +
+  theme(strip.placement = 'ouside',
+        legend.position = 'none',
+        strip.text.x = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.background = element_rect(fill = 'transparent', color = NA),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = axis_text_size),
+        axis.text.y = element_text(size = axis_text_size),
+        axis.title.y = element_text(size = axis_title_size),
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(c(0,0,0,10), 'pt'),
+        panel.grid = element_blank())
+
+# Add dots to plot
+data_plot = raw_acc_int %>%
+  MasknamesForPlots() %>%
+  dplyr::filter(intervention != 'C',
+                mask_index %in% c('Hippocampus', 'RSC')) %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + mask_index ~ manipulation, value.var = c('clf_acc')) %>%
+  dplyr::mutate(diff_clf = A-B)
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('Hippocampus','RSC'))
+data_plot$group[data_plot$group == 'older'] = 'Older'
+data_plot$group[data_plot$group == 'younger'] = 'Younger'
+data_plot$group = factor(data_plot$group)
+
+p_int_age = p_int_age +
+  # Dots for older
+  geom_point(data = data_plot[group == 'Older'],
+             aes(x = group, y = diff_clf),
+             shape = 21,
+             size = 0.8,
+             alpha = 0.3,
+             color = 'black',
+             fill = 'grey',
+             position = sdamr::position_jitternudge(jitter.width = 0.15,
+                                                    jitter.height = 0,
+                                                    nudge.x = 0.15,
+                                                    nudge.y = 0)) +
+  # Dots for younger
+  geom_point(data = data_plot[group == 'Younger'],
+             aes(x = group, y = diff_clf),
+             shape = 21,
+             size = 0.8,
+             alpha = 0.3,
+             color = 'black',
+             fill = 'grey',
+             position = sdamr::position_jitternudge(jitter.width = 0.15,
+                                                    jitter.height = 0,
+                                                    nudge.x = -0.15,
+                                                    nudge.y = 0))
+
+# Add x-axis at 0
+p_int_age = p_int_age +
+  geom_hline(yintercept = 0,
+             size = 0.4)
+
+# Adjust some theme details for each plot (font sizes and angles)
+p_group_dec_comp = p_group_dec +
+  theme(plot.margin = margin(0,10,20,10, 'pt'),
+        axis.title.y = element_text(margin = margin(0,10,0,0,'pt')),
+        strip.text.x.top = element_text(size = 0.95*12),
+        axis.text.x = element_text(size = axis_text_size+2,
+                                   angle = 45,
+                                   hjust = 1,
+                                   vjust = 1),
+       axis.text.y = element_text(size = axis_text_size+1))
+p_int_age_comp = p_int_age +
+  theme(plot.margin = margin(0,10,0,20, 'pt'),
+        axis.title.y = element_text(margin = margin(0,10,0,10,'pt')),
+        strip.text.x.top = element_text(size = 12),
+        axis.text.y = element_text(size = axis_text_size+2),
+        axis.text.x = element_text(size = axis_text_size+2,
+                                   angle = 45,
+                                   hjust = 1,
+                                   vjust = 1,
+                                   margin = margin(b = 0, unit = 'pt')))
+p_int_perm_comp = p_int_perm +
+  theme(plot.margin = margin(10,10,0,0, 'pt'),
+  axis.text.x = element_text(size = axis_text_size+1,
+    angle = 45,
+    hjust = 1,
+    vjust = 1))
+p_int_dec_comp = p_int_dec +
+  theme(plot.margin = margin(0,10,10,0, 'pt'),
+  axis.text.x = element_text(size = axis_text_size+1,
+    angle = 45,
+    hjust = 1,
+    vjust = 1))
+
+# Combine plots for left side of full plot
+p_int_left = cowplot::plot_grid(p_int_dec_comp, p_int_perm_comp,
+                                rel_heights = c(1.3,1),
+                                labels = c('A', 'B'),
+                                #label_x = -0.015,
+                                label_x = 0,
+                                label_y = 1.02,
+                                label_size = 24,
+                                ncol = 1,
+                                align = 'hv',
+                                axis = 'lb')
+
+# Combine plots for right side of full plot
+p_int_right = cowplot::plot_grid(p_group_dec_comp, p_int_age_comp,
+                                 rel_heights = c(1.3,1),
+                                 labels = c('C', 'D'),
+                                 #label_x = -0.015,
+                                 label_x = 0,
+                                 label_y = 1.02,
+                                 label_size = 24,
+                                 ncol = 1,
+                                 align = 'h',
+                                 axis = 'b')
+
+# Combine to full plot
+p_int_tb = cowplot::plot_grid(p_int_left, p_int_right,
+                              rel_widths = c(1.35,1),
+                              ncol = 2,
+                              align = 'h',
+                              axis = 'bt')
+
+# Display plot
+p_int_tb
+```
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'fig03.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_int_tb,
+       device = 'pdf',
+       width = 11,
+       height = 8)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'fig03.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_int_tb,
+       device = 'png',
+       width = 11,
+       height = 8)
+```
+
+---
+
+# Figure 4
+
+```{r, fig.width=7, fig.height=4}
+# Standards for font sizes
+strip_text_size = 12
+axis_title_size = 11
+axis_text_size = 10
+
+# load within-session accuracies:
+data_acc_within = LoadAcc(base_path = base_path,
+                          training = 'raw',
+                          testing = 'raw',
+                          events = 'walk-fwd',
+                          mask = '*',
+                          clf = 'logreg',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          xval_split = 'sub_fold',
+                          within_session = TRUE,
+                          perm = FALSE,
+                          acc_across_folds = TRUE)
+data_acc_within = RenameROIs(data_acc_within)
+
+# Preprocess behavior
+data_behav_avg = data_perf
+data_behav_avg$error[data_behav_avg$time_out] = NA
+data_behav_avg = data_behav_avg %>%
+  # Rename participant_id column name
+  dplyr::rename(participant_id = subject) %>%
+  dplyr::filter(!participant_id %in% excl,
+                intervention != 'C') %>%
+  dplyr::group_by(participant_id) %>%
+  # Get age group column
+  dplyr::mutate(group = unlist(strsplit(participant_id, '-'))[2]) %>%
+  dplyr::mutate(group = substr(group, 1, nchar(group) - 3)) %>%
+  # Summarise over trials
+  dplyr::group_by(participant_id, group, session, intervention, trial) %>%
+  dplyr::summarise(avg_error = mean(error, na.rm = TRUE),
+                   n_time_out = sum(is.na(error))) %>%
+  # Get session_plan
+  dplyr::group_by(participant_id, group, trial) %>%
+  dplyr::mutate(session_plan = paste(intervention, sep = '', collapse = ''))
+
+# Merge behavior and classification accuracy
+# Prepare clf data for merging
+data_merge_clf = data_acc_within %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C',
+                mask_index %in% c('EVC', 'Isthmus Cing. (RSC)', 'HC')) %>%
+  dplyr::group_by(participant_id, mask_index, session) %>%
+  dplyr::mutate(manipulation = unlist(str_split(intervention, ''))[session])
+  
+# Prepare behavioral data for merging
+data_merge_beh = data_behav_avg %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C') %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + session + intervention + session_plan ~ trial,
+                    value.var = c('avg_error',
+                                  'n_time_out')) %>%
+  dplyr::rename(manipulation = intervention,
+                intervention = session_plan)
+
+# Merge data
+data_clf_behav = merge(data_merge_clf, data_merge_beh) %>%
+  # log transform
+  dplyr::mutate(log_avg_error_6 = log(avg_error_6)) %>%
+  # z-score
+  dplyr::mutate(z_avg_error_6 = scale(avg_error_6),
+                z_log_avg_error_6 = scale(log_avg_error_6),
+                z_clf_acc = scale(clf_acc)) %>%
+  # demean within age groups
+  dplyr::group_by(group) %>%
+  dplyr::mutate(demean_age_log_6 = log_avg_error_6 - mean(log_avg_error_6))
+
+# Rename masks
+data_plot = data_clf_behav %>%
+  MasknamesForPlots()
+
+# Rename factor levels
+data_plot$mask_index = factor(data_plot$mask_index, levels = c("EVC", "RSC", "Hippocampus"))
+#levels(data_plot$mask_index) = c("EVC", "RSC", "Hippocampus")
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older\nadults', 'Younger\nadults')
+
+# Plot relation: Accuracy vs. last-trial error
+p_clf_behav = ggplot(data = subset(data_plot),
+       aes(x = demean_age_log_6,
+           y = clf_acc,
+           linetype = group,
+           color = mask_index,
+           fill = group)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  geom_point(shape = 21,
+             color = 'black',
+             alpha = 0.8,
+             size = 0.65) +
+  stat_smooth(method = 'lm',
+              formula = y ~ x,
+              size = 0.75,
+              se = FALSE,
+              fullrange = TRUE) +
+  stat_smooth(method = 'lm',
+              fill = 'black',
+              formula = y ~ x,
+              size = 0.75) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = c('white', 'black')) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  scale_x_continuous(limits = c(-2,2)) +
+  scale_y_continuous(limits = c(0,0.5),
+                     labels = c(0, '', 0.2, '', 0.4, '')) +
+  facet_grid(mask_index ~ group) +
+  labs(x = 'Log-transformed error\nin last trial (demeaned)',
+       y = 'Decoding accuracy') +
+  theme(strip.placement = 'ouside',
+        legend.position = 'none',
+        strip.text = element_text(angle = 0, size = strip_text_size, face = 'bold'),
+        strip.text.y = element_text(angle = 0, size = strip_text_size, face = 'bold'),
+        strip.background = element_rect(fill = 'transparent', color = NA),
+        axis.text.x = element_text(size = axis_text_size),
+        axis.text.y = element_text(size = axis_text_size),
+        axis.title.x = element_text(size = axis_title_size),
+        axis.title.y = element_text(size = axis_title_size),
+        plot.title = element_text(size = 12, face = 'bold', hjust = 0.5),
+        panel.grid.minor = element_blank(),
+        panel.grid = element_blank())
+
+# Get change in last trial performance (L-DOPA - Placebo)
+data_clf_behav_diff = data_clf_behav %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + mask_index + intervention ~ manipulation,
+                    value.var = c('avg_error_6', 'clf_acc')) %>%
+  dplyr::mutate(AminusB_error_6 = avg_error_6_A - avg_error_6_B,
+                logAminuslogB_error_6 = log(avg_error_6_A) - log(avg_error_6_B),
+                AminusB_clf = clf_acc_A - clf_acc_B) %>%
+  dplyr::mutate(z_AminusB_error_6 = scale(AminusB_error_6),
+                z_logAminuslogB_error_6 = scale(logAminuslogB_error_6),
+                z_AminusB_clf = scale(AminusB_clf))
+
+# Rename masks
+data_plot = data_clf_behav_diff %>%
+  MasknamesForPlots()
+
+# Rename factor levels
+data_plot$mask_index = factor(data_plot$mask_index, levels = c("EVC", "RSC", "Hippocampus"))
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older\nadults', 'Younger\nadults')
+
+# Plot Change in last trial performance vs. change in accuracy (L-DOPA - Placebo)
+p_clf_behav_diff = ggplot(data = data_plot,
+       aes(x = logAminuslogB_error_6,
+           y = AminusB_clf,
+           linetype = group,
+           color = mask_index,
+           fill = group)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  geom_point(shape = 21,
+             color = 'black',
+             alpha = 0.8,
+             size = 0.65) +
+  stat_smooth(method = 'lm',
+              formula = y ~ x,
+              size = 0.75,
+              se = FALSE,
+              fullrange = TRUE) +
+  stat_smooth(method = 'lm',
+              fill = 'black',
+              formula = y ~ x,
+              size = 0.75) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = c('white', 'black')) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  facet_grid(mask_index ~ group) +
+  labs(x = 'Change in error in last trial\n(L-DOPA - Placebo)',
+       y = 'Change in decoding accuracy\n(L-DOPA - Placebo)') +
+  theme(strip.placement = 'ouside',
+        legend.position = 'none',
+        strip.text = element_text(angle = 0, size = strip_text_size, face = 'bold'),
+        #strip.text.y = element_text(angle = 0, size = 12, face = 'bold'),
+        strip.text.y = element_blank(),
+        strip.background.x = element_rect(fill = 'transparent', color = NA),
+        axis.text.x = element_text(size = axis_text_size),
+        axis.text.y = element_text(size = axis_text_size),
+        axis.title.x = element_text(size = axis_title_size),
+        axis.title.y = element_text(size = axis_title_size),
+        panel.grid = element_blank())
+
+# Combine into one plot
+p_clf_behav_final = cowplot::plot_grid(p_clf_behav, p_clf_behav_diff,
+                                       labels = c('A', 'B'),
+                                       ncol = 2,
+                                       rel_widths = c(1,0.7),
+                                       align = 'h',
+                                       axis = 'tb')
+
+# Display plot
+p_clf_behav_final
+```
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'fig04.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_clf_behav_final,
+       device = 'pdf',
+       width = 7,
+       height = 4)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'fig04.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_clf_behav_final,
+       device = 'png',
+       width = 7,
+       height = 4)
+```
+
+---
+
+# Figure 5
+
+```{r, fig.width=8, fig.height=4}
+# Standards for font sizes
+strip_text_size = 12
+axis_title_size = 11
+axis_text_size = 10
+
+# Load fit of Gauss
+data_gauss = LoadFit(base_path = base_path,
+                     train = 'raw',
+                     test = 'raw',
+                     events = 'walk-fwd',
+                     x_val_split = 'sub_fold',
+                     mod = 'proba',
+                     clf = 'logreg',
+                     fitted_function = 'gauss',
+                     buffering = FALSE,
+                     perm = FALSE,
+                     reorganize = TRUE,
+                     within_session = TRUE)
+data_gauss = data_gauss %>%
+  RenameROIs() %>%
+  dplyr::filter(intervention != 'C',
+                !participant_id %in% within_excl) %>%
+  as.data.table()
+
+# Restrict data to precision
+data_prec = data_gauss %>%
+  dplyr::filter(!intervention == 'C',
+                !participant_id %in% within_excl) %>%
+  dplyr::filter(mask_index %in% c('EVC', 'Isthmus Cing. (RSC)', 'HC')) %>%
+  dplyr::filter(variable == 0) %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(manipulation = unlist(strsplit(intervention, ''))[as.numeric(session)]) %>%
+  as.data.table()
+
+# Add dosage and FD
+data_prec$dosage = 0
+data_prec$fd = 0
+for(p in data_prec$participant_id){
+  # Dosage
+  data_prec$dosage[data_prec$participant_id == p] = (
+    unique(participants$mg_by_bodyweight[participants$participant_id == p])
+    )
+  # FD
+  data_prec$fd[data_prec$participant_id == p & data_prec$session == 1] = (
+    unique(participants$mriqc_fd_mean[participants$participant_id == p & participants$ses == 1])
+    )
+  data_prec$fd[data_prec$participant_id == p & data_prec$session == 2] = (
+    unique(participants$mriqc_fd_mean[participants$participant_id == p & participants$ses == 2])
+    )
+}
+
+# Get individual curves
+data_curve = data.table()
+angles = seq(-120, 180, by=1)
+angle_cols = matrix(0, 1, length(angles))
+for(row in seq(nrow(data_prec))){
+  prec = data_prec$gauss_prec[row]
+  temp = data_prec[row,]
+  temp = cbind(temp, angle_cols)
+  temp = reshape2::melt(temp,
+                        id.vars = colnames(data_prec),
+                        variable.name = 'angle',
+                        value.name = 'curve')
+  temp$angle = as.numeric(temp$angle) - 121
+  temp$curve = MyGauss(prec, angle = angles)
+  
+  data_curve = rbind(data_curve, temp)
+}
+
+# Rename masks
+data_plot = data_prec %>%
+  MasknamesForPlots()
+# Rename factor levels
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC', 'Hippocampus'))
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older\nadults', 'Younger\nadults')
+data_plot$manipulation = as.factor(data_plot$manipulation)
+levels(data_plot$manipulation) = c('L-DOPA', 'Placebo')
+data_plot$mask_index = as.factor(data_plot$mask_index)
+
+# Plot precision by age and intervention
+p_prec_age = ggplot(data = data_plot,
+                    aes(x = group,
+                        y = gauss_prec,
+                        fill = mask_index,
+                        linetype = group)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), alpha = 0.5) +
+  geom_jitter(width=0.15, height = 0, alpha = 0.5, size = 0.5) +
+  stat_summary(fun = 'mean', geom = 'point', size = 3.5, shape = 23, fill = 'white', stroke = 1) +
+  coord_capped_cart(left='both', bottom='both', expand = TRUE) +
+  scale_fill_manual(values = color_map) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  #scale_y_continuous(breaks = seq(0.15, 0.3, length.out = 3)) +
+  labs(y = 'Precision') +
+  theme(legend.position = 'none',
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = axis_title_size),
+        axis.text.x = element_text(size = axis_text_size),
+        axis.text.y = element_text(hjust = 0.5, size = 10),
+        strip.text = element_text(angle = 0, face = 'bold', size =  strip_text_size),
+        strip.text.y = element_text(angle = 0, face = 'bold', size =  strip_text_size),
+        plot.margin = unit(c(0,10,10,10), "pt"),
+        strip.background = element_rect(color = 'transparent',
+                                        fill = 'transparent'),
+        panel.grid = element_blank()) +
+  facet_grid(mask_index ~ manipulation)
+
+# Get mean curves for groups and masks
+data_plot = data_curve
+data_plot_mean = data_plot %>%
+  group_by(group, mask_index, angle, manipulation) %>%
+  dplyr::summarise(sem = sd(curve)/sqrt(length(curve)),
+                   sd = sd(curve),
+                   curve = mean(curve))
+
+# Rename factor levels
+data_plot$manipulation = as.factor(data_plot$manipulation)
+levels(data_plot$manipulation) = c('L-DOPA', 'Placebo')
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older\nadults', 'Younger\nadults')
+
+data_plot_mean$manipulation = as.factor(data_plot_mean$manipulation)
+levels(data_plot_mean$manipulation) = c('L-DOPA', 'Placebo')
+data_plot_mean$group = as.factor(data_plot_mean$group)
+levels(data_plot_mean$group) = c('Older\nadults', 'Younger\nadults')
+
+# Rename masks
+data_plot = data_plot %>%
+  MasknamesForPlots()
+data_plot_mean = data_plot_mean %>%
+  MasknamesForPlots()
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC', 'Hippocampus'))
+data_plot_mean$mask_index = factor(data_plot_mean$mask_index, levels = c('EVC', 'RSC', 'Hippocampus'))
+
+# Plot mean curves for age and intervention
+p_curves = ggplot(data = data_plot_mean,
+                  aes(x = angle,
+                      y = curve,
+                      color = mask_index,
+                      fill = mask_index,
+                      linetype=group)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+
+  geom_ribbon(aes(ymin = curve - (2 * sem), ymax = curve + (2 * sem)),
+              alpha = 1,
+              size = 0,
+              show.legend = FALSE) +
+    geom_line(size = 0.5,
+            color = 'black') +
+  scale_fill_manual(values = color_map) +
+  scale_color_manual(values = color_map) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  coord_capped_cart(bottom = 'both', left = 'both', expand = TRUE) +
+  scale_x_continuous(breaks = seq(-120, 180, by= 60),
+                     labels = c('-120°', '', '0°', '', '120°', '')) +
+  scale_y_continuous(limits = c(0.001, 0.005),
+                     breaks = seq(0.001, 0.005, length.out = 5),
+                     labels = c('', '.002', '', '.004', '')) +
+  labs(x = 'Divergence from target class',
+       y = 'Normalized probability') +
+  facet_grid(mask_index ~ manipulation) +
+  theme(legend.position = c(0.5, 0.35),
+        strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        strip.text = element_text(face = 'bold', size = strip_text_size),
+        strip.text.y = element_blank(),
+        axis.title.y = element_text(size = axis_title_size),
+        axis.text.y = element_text(size = axis_text_size),
+        axis.title.x = element_text(size = axis_title_size),
+        axis.text.x = element_text(size = axis_text_size),
+        plot.title = element_text(size = 12, face = 'bold', hjust = 0.5),
+        legend.background = element_rect(color = 'black'),
+        legend.title = element_blank(),
+        legend.key.width = unit(20, units = 'pt'),
+        #legend.key.height = unit(5, units = 'pt'),
+        #legend.spacing.y = unit(0, units = 'in'),
+        legend.text = element_text(size = 8, margin = margin(t = 5, b = 5, unit = 'pt')),
+        legend.margin = margin(t = 2, r = 5, b = 2, l = 5, unit = 'pt'),
+        legend.justification = 'center',
+        legend.direction = 'horizontal',
+        panel.grid = element_blank()) +
+  guides(color = FALSE,
+         fill = FALSE,
+         size = FALSE)
+
+# Combine into one plot
+p_prec_age_fin = cowplot::plot_grid(p_prec_age, p_curves,
+                                    ncol = 2,
+                                    labels = c('A', 'B'),
+                                    rel_widths = c(1.55,1))
+
+# Display plot
+p_prec_age_fin
+```
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'fig05.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_prec_age_fin,
+       device = 'pdf',
+       width = 8,
+       height = 4)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'fig05.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_prec_age_fin,
+       device = 'png',
+       width = 8,
+       height = 4)
+```
+
+---
+
+# Figure S1
+
+```{r, fig.width=6, fig.height=5}
+# Load voxel data
+path = file.path(base_path,
+          'derivatives',
+          'analysis',
+          'review',
+          'data_n_voxel.tsv',
+          fsep = .Platform$file.sep)
+data_nvoxel = data.table::fread(path, sep = '\t', na.strings = 'n/a', header = TRUE)
+data_nvoxel = RenameROIs(data_nvoxel)
+data_nvoxel$mask_index = as.character(data_nvoxel$mask_index)
+
+# Combine data
+data_nvoxel_clf = data.table::merge.data.table(raw_acc_int,
+                                    data_nvoxel,
+                                    by = c('participant_id', 'mask_index'))
+
+# Exclude participants
+data_nvoxel_clf = data_nvoxel_clf[!participant_id %in% within_excl] %>%
+  # Create plan column
+  .[, intervention_plan := intervention] %>%
+  # Exclude control condition
+  .[intervention_plan != 'C',] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Convert intervention to unblinded
+  .[intervention_plan == 'AB' & as.numeric(session) == 1, intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & as.numeric(session) == 2, intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & as.numeric(session) == 1, intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & as.numeric(session) == 2, intervention := 'L-DOPA'] %>%
+  .[, .(mean_clf_acc = mean(clf_acc),
+        n_voxels = unique(n_voxels)),
+    by = c('participant_id', 'mask_index', 'group', 'intervention_plan')] %>%
+  # z-score within ROIs
+  .[mask_index == 'EVC', ':='(z_mean_clf_acc = scale(mean_clf_acc),
+                              z_n_voxels = scale(n_voxels))] %>%
+  .[mask_index == 'HC', ':='(z_mean_clf_acc = scale(mean_clf_acc),
+                              z_n_voxels = scale(n_voxels))] %>%
+  .[mask_index == 'Precentral L (M1)', ':='(z_mean_clf_acc = scale(mean_clf_acc),
+                              z_n_voxels = scale(n_voxels))] %>%
+  .[mask_index == 'Entorhinal', ':='(z_mean_clf_acc = scale(mean_clf_acc),
+                              z_n_voxels = scale(n_voxels))] %>%
+  .[mask_index == 'Isthmus Cing. (RSC)', ':='(z_mean_clf_acc = scale(mean_clf_acc),
+                              z_n_voxels = scale(n_voxels))]
+
+# Standard for font sizes
+strip_text_size = 12
+axis_title_size = 11
+axis_text_size = 10
+
+# Rename ROIs
+data_plot = data_nvoxel_clf %>%
+  MasknamesForPlots(.)
+
+# Plot
+p_nvoxel_clf = ggplot(data = data_plot,
+                      aes(x = z_n_voxels,
+                          y = z_mean_clf_acc,
+                          color = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_point(size = 0.5,
+             color = 'black',
+             alpha = 0.7) +
+  geom_smooth(data=data_plot[mask_index == 'EVC'],
+              method = 'lm',
+              formula = y ~ x,
+              size = 1.5,
+              color = 'black',
+              fill = 'darkgrey') +
+  scale_x_continuous(limits = c(-3.15, 4.1), breaks = c(-2.5,0,2.5)) +
+  scale_y_continuous(limits = c(-2.7, 4.1), breaks = c(-2.5,0,2.5)) +
+  scale_color_manual(values = color_map) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  facet_wrap( ~ mask_index, nrow = 2, scales='free') +
+  labs(x = 'Number of voxels in ROI\n(z-scored)',
+       y = 'Decoding accuracy\n(z-scored)') +
+  theme(legend.position = 'none',
+        axis.title.y = element_text(size = axis_title_size),
+        axis.title.x = element_text(size = axis_title_size),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        axis.text.y = element_text(hjust = 0.5, size = axis_text_size),
+        axis.text.x = element_text(hjust = 0.5, size = axis_text_size),
+        plot.margin = unit(c(0,10,10,10), "pt"),
+        strip.placement = 'outside',
+        strip.text = element_text(size = strip_text_size, angle = 0, face = 'bold'),
+        strip.background = element_rect(color = 'transparent', fill = 'transparent'),
+        panel.grid = element_blank())
+
+# Display plot
+p_nvoxel_clf
+```
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'figS01.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_nvoxel_clf,
+       device = 'pdf',
+       width = 6,
+       height = 5)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'figS01.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_nvoxel_clf,
+       device = 'png',
+       width = 6,
+       height = 5)
+```
+
+---
+
+# Figure S2
+
+```{r, fig.width=2, fig.height=4}
+# Standards for font sizes
+strip_text_size = 15
+axis_title_size = 15
+axis_text_size = 12
+
+# Plot accuracy by age group and intervention in M1
+data_plot = raw_acc_int %>%
+  dplyr::filter(intervention != 'C') %>%
+  MasknamesForPlots()
+data_plot$mask_index = factor(data_plot$mask_index, levels = c('EVC', 'RSC',  'Hippocampus', 'Entorhinal\nCortex', 'Left Motor'))
+
+# Select ROI
+data_plot = data_plot %>%
+  dplyr::filter(mask_index %in% c('Left Motor'))
+
+# Rename factor levels
+data_plot$manipulation[data_plot$manipulation == 'A'] = 'L-DOPA'
+data_plot$manipulation[data_plot$manipulation == 'B'] = 'Placebo'
+data_plot$manipulation = factor(data_plot$manipulation, levels = c('Placebo', 'L-DOPA'))
+data_plot$group[data_plot$group == 'older'] = 'Older\nadults'
+data_plot$group[data_plot$group == 'younger'] = 'Younger\nadults'
+data_plot$group = factor(data_plot$group)
+
+# Prepare data
+data_plot_mean = data_plot %>%
+  .[, .(clf_acc = mean(clf_acc),
+        sem = sd(clf_acc)/sqrt(length(clf_acc)),
+        n = length(clf_acc),
+        sqrt_n = sqrt(length(clf_acc))),
+    by = c('manipulation', 'group', 'mask_index')]
+
+# Plot
+p_si_m1 = ggplot(data = data_plot,
+                 aes(x = manipulation,
+                     y = clf_acc,
+                     fill = mask_index)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  # Show points with offset by chance so barplot starts at chance instead of 0
+  geom_hline(yintercept = 0,
+             size = 0.3) +
+  geom_col(data = data_plot_mean[manipulation == 'L-DOPA'],
+           aes(y = clf_acc - 1/6),
+           size = 0.3,
+           alpha = 1,
+           color = 'black') +
+  geom_col(data = data_plot_mean[manipulation == 'Placebo'],
+           aes(y = clf_acc - 1/6),
+           size = 0.3,
+           alpha = 0.4,
+           color = 'black') +
+  geom_linerange(data = data_plot_mean,
+                 aes(ymin = clf_acc - 1/6 - sem, ymax = clf_acc - 1/6 + sem),
+                 color = 'black',
+                 size = 0.75) +
+  geom_point(aes(y = clf_acc - 1/6),
+             shape = 21,
+             size = 0.8,
+             alpha = 0.3,
+             color = 'black',
+             fill = 'grey',
+             position = position_jitter(width = 0.1,
+                                        height = 0,
+                                        seed = 666)) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  scale_y_continuous(limits = c(min(data_plot$clf_acc) - 1/6, max(data_plot$clf_acc) - 1/6),
+                     breaks = seq(.1,.35, by = .05) - (1/6),
+                     labels = substr(as.character(format(seq(.1,.35, by = .05)), nsmall = 2), 2,4)) +
+  labs(title = 'Left Motor Cortex',
+       y = 'Decoding accuracy') +
+  facet_grid(. ~ group, switch = 'both') +
+  scale_fill_manual(values = color_map) +
+  theme(strip.placement = 'outside',
+        strip.background = element_rect(fill = 'transparent',
+                                        color = NA),
+        strip.text.x.bottom = element_text(size = strip_text_size-5,
+                                           face = 'bold'),
+        panel.grid = element_blank(),
+        axis.line.x = element_line(size = 0,
+                                   color = NA),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = axis_title_size,
+                                    margin = margin(0,10,0,0,'pt')),
+        axis.ticks.x = element_line(size = 0,
+                                    color = NA),
+        axis.text.x = element_text(size = axis_text_size-2,
+                                   angle = 45,
+                                   hjust = 1,
+                                   vjust = 1.1),
+        axis.text.y = element_text(size = axis_text_size),
+        legend.position = 'none',
+        plot.title = element_text(size = strip_text_size-4,
+                                  face = 'bold',
+                                  hjust = 0.5))
+
+# Display plot
+p_si_m1
+```
+
+```{r}
+# Saving figure as pdf
+file = file.path(savedir,
+                 'figS02.pdf',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_si_m1,
+       device = 'pdf',
+       width = 2,
+       height = 4)
+
+# Saving figure as png
+file = file.path(savedir,
+                 'figS02.png',
+                 fsep = .Platform$file.sep)
+ggsave(filename = file,
+       plot = p_si_m1,
+       device = 'png',
+       width = 2,
+       height = 4)
+```
+

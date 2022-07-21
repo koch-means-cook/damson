@@ -1,0 +1,439 @@
+---
+title: "Demographics"
+output:
+  html_document:
+    toc: yes
+    self_contained: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    number_sections: False
+    highlight: pygments
+    theme: cosmo
+    code_folding: "hide"
+    df_print: paged
+    fig_caption: true
+  pdf_document:
+    toc: yes
+    fig_caption: true
+    latex_engine: xelatex
+fig.align: "center"
+header-includes:
+  - \usepackage{fontspec}
+  - \setmainfont{AgfaRotisSansSerif}
+email: koch@mpib-berlin.mpg.de
+---
+
+# Setup
+
+```{r, message=FALSE, warning=FALSE}
+packages = c("here",
+             "data.table",
+             "ggplot2",
+             "plyr",
+             "plotly",
+             "dplyr",
+             'viridis',
+             'stringr',
+             'lme4',
+             'papeR',
+             'binhf',
+             'knitr',
+             'lemon')
+invisible(lapply(packages, require, character.only = TRUE))
+
+# Get git directory 
+base_path = here::here()
+
+# Load pre-written functions
+source_path = file.path(base_path, 'code', 'analysis', 'utils',
+                        fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$",
+                          full.names = TRUE, recursive = TRUE)
+invisible(lapply(source_files, function(x) source(x)))
+```
+
+
+# Load demographic data
+
+```{r}
+# Load participant.tsv
+file = file.path(base_path, 'bids', 'participants.tsv')
+data_demo = data.table(read.table(file, sep = '\t', header = TRUE, check.names = FALSE))
+```
+
+---
+
+# Data summary (without placebo group)
+
+## Before exclusion
+
+```{r}
+# Convert sex variable to numeric
+data_demo$female = 0
+data_demo[sex == 'F']$female = 1
+
+
+# Combine intervention sessions variable
+data_demo$intervention = paste(data_demo$`intervention_ses-1`,
+                               data_demo$`intervention_ses-2`,
+                               sep = '')
+
+# Exclude placebo group
+data_demo = data_demo %>%
+  dplyr::filter(intervention != 'CC') %>%
+  as.data.table()
+
+# Get statistics by group
+stats_group = data_demo %>%
+  group_by(group) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Get statistics by group and intervention
+stats_intervention = data_demo %>%
+  group_by(group, intervention) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Combine stats to table
+stats_group$intervention = '-'
+stats = data.table(rbind(stats_intervention, stats_group))
+stats = stats[order(group, intervention)]
+
+# Display descriptives
+stats
+```
+
+## After exclusion {.tabset}
+
+### Sample that completed the task
+
+```{r}
+# Get excludes based on function
+excl_across = GetExcludes(modality = 'raw',
+                          xval_split = 'fold',
+                          buffering = TRUE,
+                          reorganize = TRUE,
+                          within_session = FALSE,
+                          return_reasons = TRUE)
+excl_across_reason = data.table(excl_across$reason)
+excl_across = excl_across$excl
+# Exclude CC group participants
+excl_across_reason = excl_across_reason[id %in% data_demo$participant_id]
+excl_across = excl_across[excl_across %in% data_demo$participant_id]
+
+# Get excludes relating to task performance and scanner issues
+basic = excl_across_reason[reason == 'incomplete_task']$id
+perf = excl_across_reason[reason == 'task_performance']$id
+scan = excl_across_reason[reason == 'pulse_fluctuations']$id
+
+# Apply criteria
+data_demo_excl = data_demo %>%
+  filter(!participant_id %in% unique(basic))
+
+stats_group_excl = data_demo_excl %>%
+  group_by(group) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+stats_intervention_excl = data_demo_excl %>%
+  group_by(group, intervention) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Combine stats to table
+stats_group_excl$intervention = '-'
+stats_excl = data.table(rbind(stats_intervention_excl, stats_group_excl))
+stats_excl = stats_excl[order(group, intervention)]
+
+# Display
+stats_excl
+```
+
+
+### Excluding task performance/scanner issues
+
+```{r}
+# Apply criteria
+data_demo_excl = data_demo %>%
+  filter(!participant_id %in% unique(c(basic, perf, scan)))
+
+stats_group_excl = data_demo_excl %>%
+  group_by(group) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+stats_intervention_excl = data_demo_excl %>%
+  group_by(group, intervention) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Combine stats to table
+stats_group_excl$intervention = '-'
+stats_excl = data.table(rbind(stats_intervention_excl, stats_group_excl))
+stats_excl = stats_excl[order(group, intervention)]
+
+# Display
+stats_excl
+```
+
+### Across
+
+```{r}
+# Get excludes based on function
+excl_across = GetExcludes(modality = 'raw',
+                          xval_split = 'fold',
+                          buffering = TRUE,
+                          reorganize = TRUE,
+                          within_session = FALSE,
+                          return_reasons = TRUE)
+excl_across_reason = data.table(excl_across$reason)
+excl_across = excl_across$excl
+# Exclude CC group participants
+excl_across_reason = excl_across_reason[id %in% data_demo$participant_id]
+excl_across = excl_across[excl_across %in% data_demo$participant_id]
+
+# Apply criteria
+data_demo_excl = data_demo %>%
+  filter(!participant_id %in% excl_across)
+```
+
+```{r}
+stats_group_excl = data_demo_excl %>%
+  group_by(group) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+stats_intervention_excl = data_demo_excl %>%
+  group_by(group, intervention) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Combine stats to table
+stats_group_excl$intervention = '-'
+stats_excl = data.table(rbind(stats_intervention_excl, stats_group_excl))
+stats_excl = stats_excl[order(group, intervention)]
+
+# Display
+stats_excl
+```
+
+#### Exclusions and reasons {.tabset}
+
+##### Task not completed
+
+```{r}
+excl_across_reason = data.table(excl_across_reason)
+basic = excl_across_reason[reason == 'incomplete_task']$id
+basic = unique(basic)
+basic
+```
+
+
+##### Performance
+
+```{r}
+perf = excl_across_reason[reason == 'task_performance']$id
+perf = unique(perf)
+perf = perf[!perf %in% basic]
+perf
+```
+
+##### Scanner issues
+
+```{r}
+scan = excl_across_reason[reason == 'pulse_fluctuations']$id
+scan = unique(scan)
+scan = scan[!scan %in% basic]
+scan = scan[!scan %in% perf]
+scan
+```
+
+##### Data issues
+
+```{r}
+data = excl_across_reason[reason %in% c('no_data', 'missing_buffer')]$id
+data = unique(data)
+data = data[!data %in% basic]
+data = data[!data %in% perf]
+data = data[!data %in% scan]
+data
+```
+
+##### Overview
+
+```{r}
+final = data.frame('participant_id' = basic, 'reason' = 'incomplete_task')
+final = rbind(final, data.frame('participant_id' = perf, 'reason' = 'task_performance'))
+if(length(data) != 0){
+  final = rbind(final, data.frame('participant_id' = scan, 'reason' = 'acquisition'))
+}
+if(length(data) != 0){
+ final = rbind(final, data.frame('participant_id' = data, 'reason' = 'insufficient_data')) 
+}
+final %>%
+  dplyr::group_by(reason) %>%
+  dplyr::mutate(count = seq(length(reason)))
+```
+
+
+### Within
+
+```{r}
+# Get excludes based on function
+excl_within = GetExcludes(modality = 'raw',
+                          xval_split = 'sub_fold',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          within_session = TRUE,
+                          return_reasons = TRUE)
+excl_within_reason = data.table(excl_within$reason)
+excl_within = excl_within$excl
+# Exclude participants of CC group
+excl_within_reason = excl_within_reason[id %in% data_demo$participant_id]
+excl_within = excl_within[excl_within %in% data_demo$participant_id]
+
+# Apply criteria
+data_demo_excl = data_demo %>%
+  filter(!participant_id %in% excl_within)
+```
+
+```{r}
+stats_group_excl = data_demo_excl %>%
+  group_by(group) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+stats_intervention_excl = data_demo_excl %>%
+  group_by(group, intervention) %>%
+  dplyr::summarise(n = length(age),
+                   n_female = sum(female),
+                   n_male = length(female) - sum(female),
+                   perc_female = sum(female)/length(female),
+                   age_mean = mean(age),
+                   age_sd = sd(age),
+                   age_low = min(age),
+                   age_high = max(age))
+
+# Combine stats to table
+stats_group_excl$intervention = '-'
+stats_excl = data.table(rbind(stats_intervention_excl, stats_group_excl))
+stats_excl = stats_excl[order(group, intervention)]
+
+# Display
+stats_excl
+```
+
+#### Excludes and reason {.tabset}
+
+##### Task not completed
+
+```{r}
+excl_within_reason = data.table(excl_within_reason)
+basic = excl_within_reason[reason == 'incomplete_task']$id
+basic = unique(basic)
+basic
+```
+
+
+##### Performance
+
+```{r}
+perf = excl_within_reason[reason == 'task_performance']$id
+perf = unique(perf)
+perf = perf[!perf %in% basic]
+perf
+```
+
+##### Scanner issues
+
+```{r}
+scan = excl_within_reason[reason == 'pulse_fluctuations']$id
+scan = unique(scan)
+scan = scan[!scan %in% basic]
+scan = scan[!scan %in% perf]
+scan
+```
+
+##### Data issues
+
+```{r}
+data = excl_within_reason[reason %in% c('no_data', 'missing_session')]$id
+data = unique(data)
+data = data[!data %in% basic]
+data = data[!data %in% perf]
+data = data[!data %in% scan]
+data
+```
+
+##### Overview
+
+```{r}
+final = data.frame('participant_id' = basic, 'reason' = 'incomplete_task')
+final = rbind(final, data.frame('participant_id' = perf, 'reason' = 'task_performance'))
+if(length(scan) != 0){
+  final = rbind(final, data.frame('participant_id' = scan, 'reason' = 'acquisition'))
+}
+final = rbind(final, data.frame('participant_id' = data, 'reason' = 'insufficient_data'))
+
+final = setDT(final) %>%
+  .[, count := seq(.N), by = reason]
+final
+```
+

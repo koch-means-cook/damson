@@ -1,0 +1,99 @@
+---
+title: "ScannerDrift"
+author: "Christoph"
+date: "2020/7/17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(here)
+library(jsonlite)
+
+# Get base path
+base_path = file.path(here::here())
+
+# Load pre-written functions
+source_path = file.path(base_path, 'code', 'preprocessing', 'logfile',
+                        'utils', fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$",
+                          full.names = TRUE, recursive = TRUE)
+invisible(lapply(source_files, function(x) source(x)))
+```
+
+Logging of scanner pulses inside Unreal seems to accumulate a small error 
+compared to the optimal TR timing.
+
+# Get SSE for drift adjustments 
+
+```{r}
+sub_ids = list.files(file.path(base_path, 'bids', fsep = .Platform$file.sep))
+sub_ids = sub_ids[grep('sub-', sub_ids)]
+ses_ids = c('ses-1', 'ses-2')
+
+adjustment = data.table(matrix(0, 0, 5))
+colnames(adjustment) = c('sub_id',
+                         'ses_id',
+                         'adj',
+                         'rmse',
+                         'max_t_diff')
+
+# Get SSE for each participant and session
+for(sub_id in sub_ids){
+  for(ses_id in ses_ids){
+    
+    # Get SSE for each adjustment
+    temp = DriftAdjustment(sub_id = sub_id,
+                           ses_id = ses_id,
+                           min_adj = 1,
+                           max_adj = 1.0005,
+                           steps = 5000,
+                           only_minimum = FALSE)
+    # Get only minimum
+    #temp = temp[sse == min(sse)]
+    
+    temp$sub_id = sub_id
+    temp$ses_id = ses_id
+    
+    # Append adjustment for each subject and session
+    adjustment = rbind(adjustment, temp)
+  }
+}
+```
+
+# Effect of time drift
+
+```{r}
+effect = adjustment %>%
+  filter(adj == 1)
+
+p_effect = ggplot(effect, aes(x = max_t_diff)) +
+  geom_histogram(bins = 100)
+p_effect
+```
+
+
+# Plot minimization
+
+```{r, fig.width=10, fig.height=8}
+p_min = ggplot(adjustment, aes(x = adj, y = rmse, color = ses_id)) +
+  geom_line() +
+  facet_wrap(~sub_id)
+p_min
+```
+
+
+# Adjustment for each session and subject with minimum RMSE
+
+```{r}
+min_adj = adjustment %>% 
+  group_by(sub_id, ses_id) %>%
+  slice(which.min(rmse))
+
+p_adj = ggplot(min_adj, aes(x = adj)) +
+  geom_histogram(bins = 100)
+p_adj
+```
+

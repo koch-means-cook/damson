@@ -1,0 +1,1318 @@
+---
+title: "Stats - Main"
+output:
+  html_document:
+    toc: yes
+    self_contained: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    number_sections: False
+    highlight: pygments
+    theme: cosmo
+    code_folding: "hide"
+    df_print: paged
+    fig_caption: true
+  pdf_document:
+    toc: yes
+    fig_caption: true
+    latex_engine: xelatex
+fig.align: "center"
+header-includes:
+  - \usepackage{fontspec}
+  - \setmainfont{AgfaRotisSansSerif}
+email: koch@mpib-berlin.mpg.de
+---
+
+
+# Setup
+
+```{r, warning=FALSE, message=FALSE}
+packages = c("here",
+             "data.table",
+             "ggplot2",
+             "plyr",
+             "plotly",
+             "dplyr",
+             'viridis',
+             'stringr',
+             'lme4',
+             'emmeans',
+             'car',
+             'MASS',
+             'papeR',
+             'binhf',
+             'knitr',
+             'lemon',
+             'ggforce',
+             'gghalves')
+invisible(lapply(packages, require, character.only = TRUE))
+
+# Get git directory 
+base_path = here::here()
+
+# Load pre-written functions
+source_path = file.path(base_path, 'code', 'analysis', 'utils',
+                        fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$",
+                          full.names = TRUE, recursive = TRUE)
+invisible(lapply(source_files, function(x) source(x)))
+
+# Get color map
+color_map = GetColorMap()
+
+# Set ROIs to display
+roi_vec = names(color_map)[names(color_map) != 'Precentral R (M1)' &
+                           names(color_map) != 'Precentral (M1)']
+
+# Get participant information
+file = file.path(base_path, 'bids', 'participants.tsv')
+participants = data.table::fread(file,
+                                 header = TRUE,
+                                 sep = '\t',
+                                 na.strings = 'n/a',
+                                 check.names = FALSE)
+participants = Transform_participants_tsv(participants)
+participants = participants[participants$sequence == 'nav',]
+```
+
+
+```{r}
+knitr::opts_chunk$set(out.width="100%", fig.show="hold", fig.align="center")
+options(dplyr.summarise.inform=F)
+```
+
+Apply exclusion criteria to get excludes:
+
+1. Too many timeouts during feedback phase
+2. Not correctable pulse logging fluctuations
+3. Less than 1 event in any training set
+
+```{r}
+excl = GetExcludes(modality = 'raw',
+                   xval_split = 'fold',
+                   buffering = TRUE,
+                   reorganize = TRUE,
+                   within_session = FALSE,
+                   return_reasons = TRUE)
+excl_reason = excl$reason
+excl = excl$excl
+
+
+within_excl = GetExcludes(modality = 'raw',
+                          xval_split = 'sub_fold',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          within_session = TRUE,
+                          return_reasons = TRUE)
+within_excl_reason = within_excl$reason
+within_excl = within_excl$excl
+```
+
+---
+
+# Behavioral results
+
+**Get detailed placement statistics**
+
+```{r}
+# Load func events
+data_events = LoadFuncEvents(base_path)
+
+data_drop = data_events %>%
+  # Cut data to relevant events
+  dplyr::filter(event %in% c('Phase_Feedback',
+                             'Cue',
+                             'Trial',
+                             'Drop',
+                             'Grab',
+                             'Trial_Time_Out')) %>%
+  # eliminate everything outside of feedback phase
+  dplyr::group_by(subject, session) %>%
+  dplyr::mutate(feedback_onset = onset[event == 'Phase_Feedback']) %>%
+  dplyr::mutate(feedback_fin = feedback_onset + duration[event == 'Phase_Feedback']) %>%
+  dplyr::filter(onset >= feedback_onset,
+                onset <= feedback_fin) %>%
+  # Cut data to relevant events
+  dplyr::filter(event != 'Phase_Feedback') %>%
+  as.data.table()
+
+# Fill in trials of different events of the same trial
+for(participant_id in unique(data_drop$subject)){
+  for(ses_id in unique(data_drop$session)){
+
+    # Cues
+    data_drop[subject == participant_id & session == ses_id & event == 'Cue']$trial = (
+      seq(nrow(data_drop[subject == participant_id & session == ses_id & event == 'Cue'])))
+
+    # Drops
+    data_drop[subject == participant_id & session == ses_id & event == 'Drop']$trial = (
+      seq(nrow(data_drop[subject == participant_id & session == ses_id & event == 'Drop'])))
+
+    # Grabs
+    idx_grab = which(data_drop$event == 'Grab')
+    data_drop$trial[idx_grab] = data_drop$trial[idx_grab-2]
+
+    # Trial time-outs
+    idx_timeout = which(data_drop$event == 'Trial_Time_Out')
+    data_drop$trial[idx_timeout] = data_drop$trial[idx_timeout-1]
+  }
+}
+
+# Convert locations to numeric
+data_drop$x_drop = as.numeric(data_drop$x_drop)
+data_drop$y_drop = as.numeric(data_drop$y_drop)
+data_drop$x_correct = as.numeric(data_drop$x_correct)
+data_drop$y_correct = as.numeric(data_drop$y_correct)
+
+# Melt each trial into one line
+data_perf = data_drop %>%
+  dplyr::group_by(subject, session, intervention, trial) %>%
+  dplyr::summarise(object = unique(object)[!is.na(unique(object))],
+                   x_drop = unique(x_drop)[!is.na(unique(x_drop))],
+                   y_drop = unique(y_drop)[!is.na(unique(y_drop))],
+                   x_correct = unique(x_correct)[!is.na(unique(x_correct))],
+                   y_correct = unique(y_correct)[!is.na(unique(y_correct))],
+                   time_out = 'Trial_Time_Out' %in% event) %>%
+  # Rename trial variable to sub_trial for consistency
+  dplyr::rename(sub_trial = trial) %>%
+  # Add trial variable
+  dplyr::mutate(trial = ceiling(sub_trial / 5)) %>%
+  # Calculate placement error
+  dplyr::group_by(subject, session, intervention, trial, sub_trial) %>%
+  dplyr::mutate(error = sqrt((x_drop - x_correct)^2 + (y_drop - y_correct)^2)) %>%
+  as.data.table() %>%
+  # convert placement error into virtual meters
+  dplyr::mutate(error = error / 62.5)
+
+# Save performance
+file = file.path(base_path, 'derivatives', 'analysis', 'behavioral',
+                 'performance.tsv',
+                 fsep = .Platform$file.sep)
+write.table(data_perf, file = file, sep = '\t', col.names = TRUE,
+            row.names = FALSE, na = 'n/a')
+
+
+# Get location of objects
+data_objects = data_perf %>%
+  dplyr::group_by(object) %>%
+  dplyr::summarise(x = unique(x_correct),
+                   y = unique(y_correct)) %>%
+  as.data.table()
+```
+
+## Detailed behavioral info {.tabset}
+
+### Plot of object locations
+
+```{r}
+p_objects = ggplot(data = data_objects) +
+  ggforce::geom_circle(aes(x0 = 0, y0 = 0, r = 5100), fill = NA,
+                       color = 'black', size = 1) +
+  geom_label(aes(x = x, y = y, label = object), size = 2) +
+  scale_x_continuous(limits = c(-5200, 5200)) +
+  scale_y_continuous(limits = c(-5200, 5200)) +
+  coord_fixed(ratio = 1)
+
+p_objects
+```
+
+```{r}
+# Get walkable coordinates (max where people can go)
+data_walk = LoadRawEvents(base_path = base_path) %>%
+  dplyr::filter(!is.na(yaw),
+                x < 6000)
+max_walkable_x = max(data_walk$x) # around 5100
+min_walkable_x = min(data_walk$x) # around -5100
+max_walkable_y = max(data_walk$y) # around 5100
+min_walkable_y = min(data_walk$y) # around -5100
+
+# Sample possible locations in arena
+sample_grid = data.frame(x = runif(n = 10^6, min = -5100, max = 5100),
+                         y = runif(n = 10^6, min = -5100, max = 5100))
+sample_grid$dist = sqrt(sample_grid$x^2 + sample_grid$y^2)
+sample_grid = sample_grid[sample_grid$dist < 5100,]
+sample_grid = sample_grid[sample(nrow(sample_grid), size = 10^5,
+                                 replace = FALSE),]
+sample_grid$n = seq(nrow(sample_grid))
+
+# Function to get task performance given random placement
+GetRandomPerformance = function(participant_id,
+                                data_perf,
+                                sample_grid,
+                                n_samples){
+  # Get pseudo-random task design (same for all participants)
+  data_perf = as.data.table(data_perf)
+  data = data_perf[data_perf$subject == participant_id]
+
+  # Get permutation of placement
+  data_out = data.table()
+  for(i_perm in seq(n_samples)){
+    temp = data
+
+    # "Permute" drop locations
+    sample = sample_grid[sample(nrow(sample_grid),
+                                size = nrow(temp),
+                                replace = FALSE),]
+    temp$x_perm = sample$x
+    temp$y_perm = sample$y
+    # Count permutation
+    temp$i_perm = i_perm
+
+    data_out = rbind(data_out, temp)
+  }
+
+  # Get error with permuted location
+  data_out$error_perm = sqrt(
+    (data_out$x_correct - data_out$x_perm)^2 +
+    (data_out$y_correct - data_out$y_perm)^2
+    )
+  # Convert to virtual meters
+  data_out$error_perm = data_out$error_perm / 62.5
+
+  return(data_out)
+
+}
+
+# Get permutation
+list = mclapply(unique(data_perf$subject),
+         GetRandomPerformance,
+         data_perf = data_perf,
+         sample_grid = sample_grid,
+         n_samples = 10^3,
+         mc.cores = 4)
+data_perm = data.table(ldply(list, rbind))
+
+# Save permutation to text file
+file = file.path(base_path, 'derivatives', 'analysis', 'behavioral',
+                 'chance_performance.tsv',
+                 fsep = .Platform$file.sep)
+write.table(data_perm, file = file, sep = '\t', col.names = TRUE,
+            row.names = FALSE, na = 'n/a')
+
+
+# Preprocess behavior
+data_behav_avg = data_perf
+data_behav_avg$error[data_behav_avg$time_out] = NA
+data_behav_avg = data_behav_avg %>%
+  # Rename participant_id column name
+  dplyr::rename(participant_id = subject) %>%
+  dplyr::filter(!participant_id %in% excl,
+                intervention != 'C') %>%
+  dplyr::group_by(participant_id) %>%
+  # Get age group column
+  dplyr::mutate(group = unlist(strsplit(participant_id, '-'))[2]) %>%
+  dplyr::mutate(group = substr(group, 1, nchar(group) - 3)) %>%
+  # Summarise over trials
+  dplyr::group_by(participant_id, group, session, intervention, trial) %>%
+  dplyr::summarise(avg_error = mean(error, na.rm = TRUE),
+                   log_avg_error = log(avg_error),
+                   n_time_out = sum(is.na(error))) %>%
+  # Get session_plan
+  dplyr::group_by(participant_id, group, trial) %>%
+  dplyr::mutate(session_plan = paste(intervention, sep = '', collapse = ''))
+
+# Preprocess permutation
+data_behav_perm_avg = data_perm
+data_behav_perm_avg$error[data_behav_perm_avg$time_out] = NA
+data_behav_perm_avg = data_behav_perm_avg %>%
+  dplyr::rename(participant_id = subject) %>%
+  dplyr::filter(!participant_id %in% excl,
+                intervention != 'C') %>%
+  dplyr::group_by(participant_id) %>%
+  # Get age group column
+  dplyr::mutate(group = unlist(strsplit(participant_id, '-'))[2]) %>%
+  dplyr::mutate(group = substr(group, 1, nchar(group) - 3)) %>%
+  dplyr::group_by(participant_id, group, session, intervention, trial,
+                  i_perm) %>%
+  # Summarise over trials (and permutations)
+  dplyr::summarise(avg_error = mean(error_perm, na.rm = TRUE)) %>%
+  # Get session_plan
+  dplyr::group_by(participant_id, group, trial, i_perm) %>%
+  dplyr::mutate(session_plan = paste(intervention, sep = '', collapse = ''))
+```
+
+### Plot of behavioral performance
+
+```{r}
+data_plot = data_behav_avg
+
+data_plot$group = as.factor(data_plot$group)
+levels(data_plot$group) = c('Older adults', 'Younger adults')
+data_plot$intervention = as.factor(data_plot$intervention)
+levels(data_plot$intervention) = c('L-Dopa', 'Placebo')
+
+# Process perm for plot
+data_plot_perm = data_behav_perm_avg %>%
+  dplyr::group_by(session, group, intervention, trial, i_perm) %>%
+  dplyr::filter(trial == 1) %>%
+  dplyr::summarise(avg_error = mean(avg_error))
+data_plot_perm$trial = 0
+
+data_plot_perm$group = as.factor(data_plot_perm$group)
+levels(data_plot_perm$group) = c('Older adults', 'Younger adults')
+data_plot_perm$intervention = as.factor(data_plot_perm$intervention)
+levels(data_plot_perm$intervention) = c('L-Dopa', 'Placebo')
+
+p_behav = ggplot(data = data_plot, aes(x = trial,
+                                       y = avg_error,
+                                       linetype = intervention,
+                                       fill = intervention)) +
+  theme_bw() +
+  theme(panel.border=element_blank(), axis.line=element_line()) +
+  geom_half_violin(data = subset(data_plot_perm, intervention == 'L-Dopa'),
+                   side = 'l',
+                   position = position_nudge(x = -0.07),
+                   show.legend = FALSE) +
+  geom_half_violin(data = subset(data_plot_perm, intervention == 'Placebo'),
+                   side = 'r',
+                   position = position_nudge(x = 0.07),
+                   show.legend = FALSE) +
+  geom_point(data = data_plot[data_plot$intervention == 'L-Dopa', ],
+             size = 0.6,
+             alpha = 0.8,
+             shape = 21,
+             position = position_nudge(x = -0.07)) +
+  geom_point(data = data_plot[data_plot$intervention == 'Placebo', ],
+             size = 0.6,
+             alpha = 0.8,
+             shape = 21,
+             position = position_nudge(x = 0.07)) +
+  stat_summary(fun = 'mean', geom = 'line', size = 1, aes(group = intervention),
+               color = 'black') +
+  stat_summary(fun = 'mean', geom = 'point', shape = 21, size = 3,
+               color = 'black') +
+  scale_fill_manual(values = c('white', 'black')) +
+  scale_linetype_manual(values = c('dashed', 'solid')) +
+  scale_x_continuous(breaks = c(0, seq(6)), labels = c('Chance', seq(6))) +
+  coord_capped_cart(left='both', bottom='both', right = 'both', expand = TRUE) +
+  labs(x = 'Trial', y = 'Average distance error') +
+  facet_grid(. ~ group, switch = 'y') +
+  theme(strip.background = element_rect(color = 'transparent',
+                                        fill = 'transparent'),
+        strip.placement = 'outside',
+        strip.text.x = element_text(size = 12, angle = 0, face = 'bold'),
+        strip.text.y.left = element_text(size = 12, angle = 0, face = 'bold'),
+        axis.title.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11),
+        plot.margin = unit(c(0,10,0,0), "pt"),
+        legend.position = c(0.25, 0.1),
+        legend.background = element_rect(
+                                         color = 'black'),
+        legend.title = element_blank(),
+        legend.key.width = unit(20, units = 'pt'),
+        #legend.key.height = unit(5, units = 'pt'),
+        #legend.spacing.y = unit(0, units = 'in'),
+        legend.text = element_text(size = 8, margin = margin(t = 5, b = 5,
+                                                             unit = 'pt')),
+        legend.margin = margin(t = 2, r = 5, b = 2, l = 5, unit = 'pt'),
+        legend.justification = 'center',
+        legend.direction = 'horizontal')
+
+p_behav
+```
+
+## Learning (T1 vs. T6) {.tabset}
+
+**Get trial difference (T1 vs. T6)**
+
+```{r}
+# Negative numbers mean learning
+data_learning = data_behav_avg %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + session + intervention + session_plan ~ trial,
+                    value.var = c('avg_error',
+                                  'log_avg_error')) %>%
+  dplyr::mutate(T1minusT6 = avg_error_1 - avg_error_6,
+                logT1minuslogT6 = log_avg_error_1 - log_avg_error_6) %>%
+  as.data.table()
+```
+
+### Distributions
+
+**T1 - T6**
+
+```{r}
+hist(data_learning[group == 'younger' & intervention == 'A']$T1minusT6)
+hist(data_learning[group == 'younger' & intervention == 'B']$T1minusT6)
+hist(data_learning[group == 'older' & intervention == 'A']$T1minusT6)
+hist(data_learning[group == 'older' & intervention == 'B']$T1minusT6)
+```
+
+**log(T1) - log(T6)**
+
+```{r}
+hist(data_learning[group == 'younger' & intervention == 'A']$logT1minuslogT6)
+hist(data_learning[group == 'younger' & intervention == 'B']$logT1minuslogT6)
+hist(data_learning[group == 'older' & intervention == 'A']$logT1minuslogT6)
+hist(data_learning[group == 'older' & intervention == 'B']$logT1minuslogT6)
+```
+
+### LMM: Performance increase
+
+```{r}
+data_learning$logT1minuslogT6 = as.numeric(data_learning$logT1minuslogT6)
+data_learning$intervention = as.factor(data_learning$intervention)
+data_learning$group = as.factor(data_learning$group)
+data_learning$session_plan = as.factor(data_learning$session_plan)
+
+m1 = lme4::lmer(logT1minuslogT6 ~ intervention * group * session_plan + (1 | participant_id),
+                data = data_learning)
+Anova(m1)
+```
+
+#### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+#### Interaction: Group X Session order
+
+```{r}
+bla = emmeans(m1, pairwise ~ group | session_plan)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+## Performance at the end of learning {.tabset}
+
+### Distribution
+
+**No transform**
+
+```{r}
+hist(data_learning[group == 'older' & intervention == 'A']$avg_error_6)
+hist(data_learning[group == 'older' & intervention == 'B']$avg_error_6)
+hist(data_learning[group == 'younger' & intervention == 'A']$avg_error_6)
+hist(data_learning[group == 'younger' & intervention == 'B']$avg_error_6)
+```
+
+**KS tests**
+
+```{r}
+# Older adults
+data = data_learning[group == 'older']$avg_error_6
+ks.test(data, "pnorm", mean(data), sd(data))
+# Younger adults
+data = data_learning[group == 'younger']$avg_error_6
+ks.test(data, "pnorm", mean(data), sd(data))
+```
+
+**Log-transform**
+
+```{r}
+data_learning$log_avg_error_6 = log(data_learning$avg_error_6)
+
+hist(data_learning[group == 'older' & intervention == 'A']$log_avg_error_6)
+hist(data_learning[group == 'older' & intervention == 'B']$log_avg_error_6)
+hist(data_learning[group == 'younger' & intervention == 'A']$log_avg_error_6)
+hist(data_learning[group == 'younger' & intervention == 'B']$log_avg_error_6)
+```
+
+**KS tests**
+
+```{r}
+# Older adults
+data = data_learning[group == 'older']$log_avg_error_6
+ks.test(data, "pnorm", mean(data), sd(data))
+# Younger adults
+data = data_learning[group == 'younger']$log_avg_error_6
+ks.test(data, "pnorm", mean(data), sd(data))
+```
+
+### LMM: End of learning
+
+```{r}
+m1 = lme4::lmer(log_avg_error_6 ~ intervention * group * session_plan + (1 | participant_id),
+                data = data_learning)
+Anova(m1)
+```
+
+#### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+#### Interaction: Intervention X Session order
+
+```{r}
+bla = emmeans(m1, pairwise ~ intervention | session_plan)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+---
+
+# Decoding: Baseline comparison
+
+```{r}
+# Load accuracy
+data_clf = LoadAcc(base_path = base_path,
+                   training = 'raw',
+                   testing = 'raw',
+                   events = 'walk-fwd',
+                   mask = '*',
+                   clf = 'logreg',
+                   buffering = FALSE,
+                   reorganize = TRUE,
+                   xval_split = 'sub_fold',
+                   within_session = TRUE,
+                   perm = FALSE,
+                   acc_across_folds = TRUE,
+                   SMOTE = FALSE)
+data_clf = data_clf %>%
+  RenameROIs(.) %>%
+  # Exclude participants
+  .[!participant_id %in% within_excl,] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Set up intervention analysis
+  .[,intervention_plan := intervention] %>%
+  .[intervention_plan != 'C',] %>%
+  .[intervention_plan == 'AB' & session == '1', intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & session == '2', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '1', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '2', intervention := 'L-DOPA']
+
+data_clf_perm = LoadAcc(base_path = base_path,
+                        training = 'raw',
+                        testing = 'raw',
+                        events = 'walk-fwd',
+                        mask = '*',
+                        clf = 'logreg',
+                        buffering = FALSE,
+                        reorganize = TRUE,
+                        xval_split = 'sub_fold',
+                        within_session = TRUE,
+                        perm = TRUE,
+                        acc_across_folds = TRUE,
+                        SMOTE = FALSE)
+data_clf_perm = data_clf_perm %>%
+  RenameROIs(.) %>%
+  # Exclude participants
+  .[!participant_id %in% within_excl,] %>%
+  # Exclude MTL
+  .[mask_index != 'MTL',] %>%
+  # Set up intervention analysis
+  .[,intervention_plan := intervention] %>%
+  .[intervention_plan != 'C',] %>%
+  .[intervention_plan == 'AB' & session == '1', intervention := 'L-DOPA'] %>%
+  .[intervention_plan == 'AB' & session == '2', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '1', intervention := 'Placebo'] %>%
+  .[intervention_plan == 'BA' & session == '2', intervention := 'L-DOPA']
+
+# Average decoding across sessions and groups
+data_clf_mean = data_clf %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index')]
+
+data_clf_perm_mean = data_clf_perm %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('mask_index', 'i_perm')]
+
+data_permutation = data_clf_mean %>%
+  # Duplicate clf column to append to permutation without column name conflicts
+  .[, real_clf_mean := mean_clf_acc]
+data_permutation_cutoff = data_clf_perm_mean %>%
+  # Add mean classification accuracy
+  data.table::merge.data.table(., data_permutation,
+                               by = c('mask_index')) %>%
+  # Eliminate column duplicates through merging
+  .[, mean_clf_acc := mean_clf_acc.x] %>%
+  .[, c('mean_clf_acc.x', 'mean_clf_acc.y') := NULL] %>%
+  # How many of the permutation results are higher than real accuracy?
+  .[, perm_higher := mean_clf_acc > real_clf_mean,
+    by = c('mask_index', 'i_perm')] %>%
+  # Get two-sided cut-off for above chance and p-value of permutation test
+  .[, .(cut_off = quantile(mean_clf_acc, 0.975),
+        mean_clf_acc = unique(real_clf_mean),
+        p = sum(perm_higher) / .N),
+    by = c('mask_index')]
+```
+
+## t-tests against baseline (one-sided)
+
+```{r}
+data_t = data_clf[mask_index != 'Precentral L (M1)'] %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('participant_id', 'mask_index')] %>%
+  .[, .(mean_clf = mean(mean_clf_acc),
+        t = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$statistic,
+        df = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$parameter,
+        p = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$p.value),
+    by = c('mask_index')] %>%
+  .[, p_adj_holm := p.adjust(p, method = 'holm')]
+
+data_t[,]
+```
+
+## Permutation tests
+
+```{r}
+table_cutoff = data_permutation_cutoff[mask_index != 'Precentral L (M1)'] %>%
+  .[, p_adj_holm := p.adjust(p, method = 'holm')]
+table_cutoff[, c('mask_index', 'mean_clf_acc', 'p', 'p_adj_holm')]
+```
+
+# Decoding: Baseline comparisons within intervention
+
+```{r}
+# Get group averages for both age groups and each session
+data_clf_mean = data_clf %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('intervention', 'mask_index')]
+
+data_clf_perm_mean = data_clf_perm %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('intervention', 'mask_index', 'i_perm')]
+
+data_permutation_intervention = data_clf_mean %>%
+  # Duplicate clf column to append to permutation without column name conflicts
+  .[, real_clf_mean := mean_clf_acc]
+data_permutation_intervention_cutoff = data_clf_perm_mean %>%
+  # Add mean classification accuracy
+  data.table::merge.data.table(., data_permutation_intervention,
+                               by = c('intervention', 'mask_index')) %>%
+  # Eliminate column duplicates through merging
+  .[, mean_clf_acc := mean_clf_acc.x] %>%
+  .[, c('mean_clf_acc.x', 'mean_clf_acc.y') := NULL] %>%
+  # How many of the permutation results are higher than real accuracy?
+  .[, perm_higher := mean_clf_acc > real_clf_mean,
+    by = c('intervention', 'mask_index', 'i_perm')] %>%
+  # Get two-sided cut-off for above chance and p-value of permutation test
+  .[, .(cut_off = quantile(mean_clf_acc, 0.975),
+        mean_clf_acc = unique(real_clf_mean),
+        p = sum(perm_higher) / .N),
+    by = c('intervention', 'mask_index')]
+```
+
+## t-tests against baseline (one-sided)
+
+```{r}
+data_t = data_clf[mask_index != 'Precentral L (M1)'] %>%
+  .[, .(mean_clf_acc = mean(clf_acc)),
+    by = c('participant_id', 'intervention', 'mask_index')] %>%
+  .[, .(mean_clf = mean(mean_clf_acc),
+        t = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$statistic,
+        df = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$parameter,
+        p = t.test(mean_clf_acc, mu = 1/6, alternative = 'greater')$p.value),
+    by = c('intervention', 'mask_index')] %>%
+  .[, p_adj_holm := p.adjust(p, method = 'holm')]
+
+data_t[,]
+```
+
+## Permutation tests
+
+```{r}
+table_cutoff = data_permutation_intervention_cutoff[mask_index != 'Precentral L (M1)'] %>%
+  .[, p_adj := p.adjust(p, method = 'holm')]
+table_cutoff[, c('intervention', 'mask_index', 'mean_clf_acc', 'p', 'p_adj')]
+```
+
+---
+
+# Within session decoding
+
+## Classification accuracy {.tabset}
+
+```{r}
+# Load data
+data_acc_within = LoadAcc(base_path = base_path,
+                          training = 'raw',
+                          testing = 'raw',
+                          events = 'walk-fwd',
+                          mask = '*',
+                          clf = 'logreg',
+                          buffering = FALSE,
+                          reorganize = TRUE,
+                          xval_split = 'sub_fold',
+                          within_session = TRUE,
+                          perm = FALSE,
+                          acc_across_folds = TRUE)
+data_acc_within = RenameROIs(data_acc_within) %>%
+  .[mask_index != 'MTL']
+
+## Add intervention
+data_acc_within$intervention_plan = data_acc_within$intervention
+data_acc_within$intervention[data_acc_within$session == 1] = substr(data_acc_within$intervention[data_acc_within$session == 1],1,1)
+data_acc_within$intervention[data_acc_within$session == 2] = substr(data_acc_within$intervention[data_acc_within$session == 2],2,2)
+data_acc_within$intervention[data_acc_within$intervention_plan == 'C'] = 'C'
+
+## Average folds
+cols = colnames(data_acc_within)[colnames(data_acc_within) != 'clf_acc']
+data_acc_within = data_acc_within %>%
+  group_by_at(cols) %>%
+  dplyr::summarise(clf_acc = mean(clf_acc))
+
+# Exclude C group for within participant analysis of drug influence
+data_acc_within_ab = data_acc_within[data_acc_within$intervention != 'C',]
+
+# Add dosage/weight and framewise displacement
+data_acc_within_ab$dosage = 0
+data_acc_within_ab$fd = 0
+for(p in data_acc_within_ab$participant_id){
+  # Dosage
+  data_acc_within_ab$dosage[data_acc_within_ab$participant_id == p] = (
+    unique(participants$mg_by_bodyweight[participants$participant_id == p])
+    )
+  # FD
+  data_acc_within_ab$fd[data_acc_within_ab$participant_id == p & data_acc_within_ab$session == 1] = (
+    unique(participants$mriqc_fd_mean[participants$participant_id == p & participants$ses == 1])
+    )
+  data_acc_within_ab$fd[data_acc_within_ab$participant_id == p & data_acc_within_ab$session == 2] = (
+    unique(participants$mriqc_fd_mean[participants$participant_id == p & participants$ses == 2])
+    )
+}
+
+# Adjust variable types
+data_acc_within_ab$clf_acc = as.numeric(data_acc_within_ab$clf_acc)
+data_acc_within_ab$dosage = as.numeric(data_acc_within_ab$dosage)
+data_acc_within_ab$fd = as.numeric(data_acc_within_ab$fd)
+data_acc_within_ab$intervention = as.factor(data_acc_within_ab$intervention)
+data_acc_within_ab$group = as.factor(data_acc_within_ab$group)
+data_acc_within_ab$session = as.factor(data_acc_within_ab$session)
+
+
+# Apply exclusion criteria:
+data_acc_within = data.table(data_acc_within)
+data_acc_within_ab = data.table(data_acc_within_ab)
+data_acc_within = data_acc_within[!participant_id %in% within_excl]
+data_acc_within_ab = data_acc_within_ab[!participant_id %in% within_excl]
+
+# Load participants.tsv
+file = file.path(base_path, 'bids', 'participants.tsv')
+data_demo = data.table::fread(file,
+                              sep = '\t',
+                              header = TRUE,
+                              check.names = FALSE)
+# Combine intervention sessions variable
+data_demo$intervention = paste(data_demo$`intervention_ses-1`,
+                               data_demo$`intervention_ses-2`,
+                               sep = '')
+# Exclude placebo group
+data_demo = data_demo %>%
+  dplyr::filter(intervention != 'CC') %>%
+  as.data.table()
+
+# Construct intervention_plan
+data_acc_within_ab$intervention_plan = ''
+data_acc_within_ab[intervention == 'A' & as.numeric(session) == 1]$intervention_plan = 'AB'
+data_acc_within_ab[intervention == 'A' & as.numeric(session) == 2]$intervention_plan = 'BA'
+data_acc_within_ab[intervention == 'B' & as.numeric(session) == 1]$intervention_plan = 'BA'
+data_acc_within_ab[intervention == 'B' & as.numeric(session) == 2]$intervention_plan = 'AB'
+
+# Assure data types
+data_acc_within_ab$participant_id = as.factor(data_acc_within_ab$participant_id)
+data_acc_within_ab$group = as.factor(data_acc_within_ab$group)
+data_acc_within_ab$intervention = as.factor(data_acc_within_ab$intervention)
+data_acc_within_ab$intervention_plan = as.factor(data_acc_within_ab$intervention_plan)
+data_acc_within_ab$mask_index = as.factor(data_acc_within_ab$mask_index)
+data_acc_within_ab$session = as.factor(data_acc_within_ab$session)
+data_acc_within_ab$clf_acc = as.numeric(data_acc_within_ab$clf_acc)
+data_acc_within_ab$dosage = as.numeric(data_acc_within_ab$dosage)
+data_acc_within_ab$fd = as.numeric(data_acc_within_ab$fd)
+```
+
+### Omnibus {.tabset}
+
+```{r}
+m1 = lmer(clf_acc ~ intervention*intervention_plan*group*mask_index + dosage:intervention + fd + fd:intervention + (1 + intervention | participant_id), data_acc_within_ab)
+prettify(Anova(m1))
+```
+
+#### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+#### Main: ROI
+
+```{r}
+emmeans(m1, pairwise ~ mask_index)
+```
+
+#### Main: Intervention
+
+```{r}
+emmeans(m1, pairwise ~ intervention)
+```
+
+#### Interaction: Group X ROI
+
+```{r}
+bla = emmeans(m1, pairwise ~ group | mask_index)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+#### Interaction: Intervention X ROI (exploratory)
+
+```{r}
+# Intervention does not show evidence to be part of any interaction
+emmeans(m1, pairwise ~ intervention | mask_index)
+```
+
+### ROI-specific models (exploratory) {.tabset}
+
+#### EVC {.tabset}
+
+```{r}
+data_sub = data_acc_within_ab[data_acc_within_ab$mask_index == 'EVC',]
+m1 = lmer(clf_acc ~ intervention*intervention_plan*group + dosage:intervention + fd + fd:intervention + (1 | participant_id), data_sub)
+prettify(Anova(m1))
+```
+
+##### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+##### Main: FD
+
+```{r}
+lm = lm(clf_acc ~ fd, data = data_sub)
+summary(lm)
+```
+
+
+#### HC {.tabset}
+
+```{r}
+data_sub = data_acc_within_ab[data_acc_within_ab$mask_index == 'HC',]
+m1 = lmer(clf_acc ~ intervention*intervention_plan*group + dosage:intervention + fd + fd:intervention + (1 | participant_id), data_sub)
+prettify(Anova(m1))
+```
+
+##### Main: Intervention
+
+```{r}
+emmeans(m1, pairwise ~ intervention)
+```
+
+
+#### Isthmus Cing. (RSC) {.tabset}
+
+```{r}
+data_sub = data_acc_within_ab[data_acc_within_ab$mask_index == 'Isthmus Cing. (RSC)',]
+m1 = lmer(clf_acc ~ intervention*intervention_plan*group + dosage:intervention + fd + fd:intervention + (1 | participant_id), data_sub)
+prettify(Anova(m1))
+```
+
+#### Interaction: Intervention X Group
+
+```{r}
+bla = emmeans(m1, pairwise ~ intervention | group)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+
+---
+
+## Precision {.tabset}
+
+```{r}
+data_conf = LoadConf(base_path = base_path,
+                     training = 'raw',
+                     testing = 'raw',
+                     events = 'walk-fwd',
+                     mask = '*',
+                     xval_split = 'sub_fold',
+                     clf = 'logreg',
+                     buffering = FALSE,
+                     perm = FALSE,
+                     average_buffers = FALSE,
+                     restrict = TRUE,
+                     reorganize = TRUE,
+                     within_session = TRUE)
+data_conf = RenameROIs(data_conf)
+
+# Select participants based on exclusion criteria
+data_conf = data_conf %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C',
+                mask_index %in% c('HC', 'Isthmus Cing. (RSC)', 'EVC')) %>%
+  as.data.table()
+
+# Load probability curves and correlation
+data_pc = LoadPred(base_path = base_path,
+                   training = 'raw',
+                   testing = 'raw',
+                   events = 'walk-fwd',
+                   mask = '*',
+                   xval_split = 'sub_fold',
+                   clf = 'logreg',
+                   buffering = FALSE,
+                   average = TRUE,
+                   perm = FALSE,
+                   reorganize = TRUE,
+                   within_session = TRUE,
+                   print_progress = FALSE)
+data_pc = RenameROIs(data_pc)
+
+# Select participants based on exclusion criteria and restrict ROIs
+data_pc = data_pc %>%
+  dplyr::filter(!participant_id %in% within_excl,
+               intervention != 'C',
+               mask_index %in% c('HC', 'Isthmus Cing. (RSC)', 'EVC')) %>%
+  as.data.table()
+
+# Restrict averaged single trial predictions to logreg probability prediction
+data_proba = data_pc
+data_proba$value = data_proba$value_proba
+data_proba[,c('value_proba', 'value_corr') := NULL]
+# Average over buffers
+cols = colnames(data_proba)[colnames(data_proba) != 'buffer' &
+                              colnames(data_proba) != 'value']
+data_proba = data_proba %>%
+  group_by_at(cols) %>%
+  dplyr::summarise(value = mean(value))
+
+# Load fit of curves
+# Gauss
+data_gauss = LoadFit(base_path = base_path,
+                     train = 'raw',
+                     test = 'raw',
+                     events = 'walk-fwd',
+                     x_val_split = 'sub_fold',
+                     mod = 'proba',
+                     clf = 'logreg',
+                     fitted_function = 'gauss',
+                     buffering = FALSE,
+                     perm = FALSE,
+                     reorganize = TRUE,
+                     within_session = TRUE)
+data_gauss = RenameROIs(data_gauss)
+data_gauss_allROI = data_gauss %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C') %>%
+  as.data.table()
+data_gauss = data_gauss %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C',
+                mask_index %in% c('HC', 'Isthmus Cing. (RSC)', 'EVC')) %>%
+  as.data.table()
+```
+
+### Omnibus {.tabset}
+
+```{r}
+data_lmer = data_gauss %>%
+  dplyr::filter(mask_index %in% c('HC', 'Isthmus Cing. (RSC)', 'EVC'),
+                variable == 0) %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::mutate(manipulation = unlist(strsplit(intervention, split = ''))[session])
+data_lmer = data.table(data_lmer)
+
+# Add FD and dosage to data
+data_lmer$fd = 0
+data_lmer$dosage = 0
+for(p in unique(data_lmer$participant_id)){
+  # FD
+  data_lmer[participant_id == p & session == 1]$fd = (
+    participants[participant_id == p & ses == 1]$mriqc_fd_mean)
+  data_lmer[participant_id == p & session == 2]$fd = (
+    participants[participant_id == p & ses == 2]$mriqc_fd_mean)
+  # Dosage
+  data_lmer[participant_id == p & session == 1]$dosage = (
+    participants[participant_id == p & ses == 1]$mg_by_bodyweight)
+  data_lmer[participant_id == p & session == 2]$dosage = (
+    participants[participant_id == p & ses == 2]$mg_by_bodyweight)
+}
+
+data_lmer$intervention = as.factor(data_lmer$intervention)
+data_lmer$manipulation = as.factor(data_lmer$manipulation)
+data_lmer$mask_index = as.factor(data_lmer$mask_index)
+data_lmer$group = as.factor(data_lmer$group)
+data_lmer$session = as.factor(data_lmer$session)
+
+m1 = lmer(gauss_prec ~ manipulation*group*mask_index*intervention + dosage:manipulation + fd + fd:manipulation + (1 + manipulation | participant_id), data_lmer)
+prettify(Anova(m1))
+```
+
+#### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+#### Main: ROI
+
+```{r}
+emmeans(m1, pairwise ~ mask_index)
+```
+
+#### Interaction: Group X ROI
+
+```{r}
+bla = emmeans(m1, pairwise ~ group | mask_index)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+#### Interaction: Intervention X Session order
+
+```{r}
+bla = emmeans(m1, pairwise ~ manipulation | intervention)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+### ROI-specific models {.tabset}
+
+#### EVC {.tabset}
+
+```{r}
+m1 = lmer(gauss_prec ~ manipulation*group*intervention + dosage:manipulation + fd + fd:manipulation + (1|participant_id), subset(data_lmer, mask_index == 'EVC'))
+prettify(Anova(m1))
+```
+
+##### Main: Group
+
+```{r}
+emmeans(m1, pairwise ~ group)
+```
+
+##### Interaction: Intervention X Session order
+
+```{r}
+bla = emmeans(m1, pairwise ~ manipulation | intervention)
+summary(bla, by = NULL, adjust = 'sidak')
+```
+
+
+#### RSC {.tabset}
+
+```{r}
+m1 = lmer(gauss_prec ~ manipulation*group*intervention + dosage:manipulation + fd + fd:manipulation + (1|participant_id), subset(data_lmer, mask_index == 'Isthmus Cing. (RSC)'))
+prettify(Anova(m1))
+```
+
+#### HC {.tabset}
+
+```{r}
+m1 = lmer(gauss_prec ~ manipulation*group*intervention + dosage:manipulation + fd + fd:manipulation + (1|participant_id), subset(data_lmer, mask_index == 'HC'))
+prettify(Anova(m1))
+```
+
+---
+
+# Relationship between signal specificity and task performance
+
+## Performance on last trial
+
+```{r}
+# Merge behavior and classification accuracy files
+data_merge_clf = data_acc_within_ab %>%
+  dplyr::filter(mask_index %in% c('EVC', 'HC', 'Isthmus Cing. (RSC)')) %>%
+  dplyr::rename(session_plan = intervention_plan) %>%
+  dplyr::group_by(participant_id, mask_index, session) %>%
+  as.data.frame()
+  
+# Prepare behavioral data for merging
+data_merge_beh = data_behav_avg %>%
+  dplyr::filter(!participant_id %in% within_excl,
+                intervention != 'C') %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + session + intervention + session_plan ~ trial,
+                    value.var = c('avg_error',
+                                  'log_avg_error',
+                                  'n_time_out'))
+
+# Merge data
+data_clf_behav = merge(data_merge_clf, data_merge_beh) %>%
+  # z-score
+  dplyr::mutate(z_avg_error_6 = scale(avg_error_6),
+                z_log_avg_error_6 = scale(log_avg_error_6),
+                z_clf_acc = scale(clf_acc)) %>%
+  # Demean wihtin age group
+  dplyr::group_by(group) %>%
+  dplyr::mutate(demean_age_log_6 = log_avg_error_6 - mean(log_avg_error_6)) %>%
+  as.data.table()
+
+# Add dosage and fd
+data_clf_behav$fd = 0
+data_clf_behav$dosage = 0
+for(p in unique(data_clf_behav$participant_id)){
+  # FD
+  data_clf_behav[participant_id == p & session == 1]$fd = (
+    participants[participant_id == p & ses == 1]$mriqc_fd_mean)
+  data_clf_behav[participant_id == p & session == 2]$fd = (
+    participants[participant_id == p & ses == 2]$mriqc_fd_mean)
+  # Dosage
+  data_clf_behav[participant_id == p & session == 1]$dosage = (
+    participants[participant_id == p & ses == 1]$mg_by_bodyweight)
+  data_clf_behav[participant_id == p & session == 2]$dosage = (
+    participants[participant_id == p & ses == 2]$mg_by_bodyweight)
+}
+
+```
+
+
+### Distributions
+
+**No transform**
+
+```{r, out.width='20%'}
+hist(data_clf_behav[group == 'older' & mask_index == 'EVC']$avg_error_6)
+hist(data_clf_behav[group == 'younger' & mask_index == 'EVC']$avg_error_6)
+```
+
+**Log transform**
+
+```{r, out.width='20%'}
+hist(data_clf_behav[group == 'older' & mask_index == 'EVC']$log_avg_error_6)
+hist(data_clf_behav[group == 'younger' & mask_index == 'EVC']$log_avg_error_6)
+```
+
+### Individual models {.tabset}
+
+#### EVC
+
+```{r}
+m1 = lme4::lmer(clf_acc ~ 
+                  demean_age_log_6 * intervention * group * session_plan + 
+                  (1 | participant_id),
+                data = subset(data_clf_behav, mask_index == 'EVC'))
+prettify(Anova(m1))
+qqnorm(residuals(m1))
+```
+
+**Get slope of main effect**
+
+```{r}
+summary(m1)
+```
+
+
+**Relationship interacts with age group**
+
+```{r}
+emtrends(m1, pairwise ~ group, var = 'demean_age_log_6')
+joint_tests(m1, by = 'group')
+```
+
+**Relationship interacts with session order**
+
+```{r}
+emtrends(m1, pairwise ~ session_plan, var = 'demean_age_log_6')
+joint_tests(m1, by = 'session_plan')
+```
+
+
+#### RSC
+
+```{r}
+m1 = lme4::lmer(clf_acc ~ 
+                  demean_age_log_6 * intervention * group * session_plan + 
+                  (1 | participant_id),
+                data = subset(data_clf_behav, mask_index == 'Isthmus Cing. (RSC)'))
+prettify(Anova(m1))
+qqnorm(residuals(m1))
+```
+
+#### HC
+
+```{r}
+m1 = lme4::lmer(clf_acc ~ 
+                  demean_age_log_6 * intervention * group * session_plan + 
+                  (1 | participant_id),
+                data = subset(data_clf_behav, mask_index == 'HC'))
+prettify(Anova(m1))
+qqnorm(residuals(m1))
+```
+
+---
+
+## Change-Change (Behavioral - CLF accuracy)
+
+```{r}
+data_clf_behav_diff = data_clf_behav %>%
+  as.data.table() %>%
+  data.table::dcast(participant_id + group + session_plan + mask_index ~ intervention,
+                    value.var = c('clf_acc', 'avg_error_6')) %>%
+  dplyr::mutate(AminusB_clf = clf_acc_A -clf_acc_B,
+                AminusB_avg_error_6 = avg_error_6_A - avg_error_6_B,
+                logAminuslogB_avg_error_6 = log(avg_error_6_A) - log(avg_error_6_B))
+```
+
+### Distribution {.tabset}
+
+#### Clf difference
+
+```{r, out.width='20%'}
+hist(data_clf_behav_diff[group == 'younger']$AminusB_clf)
+hist(data_clf_behav_diff[group == 'older']$AminusB_clf)
+```
+
+#### Behavior difference
+
+**Not transformed**
+
+```{r, out.width='20%'}
+hist(data_clf_behav_diff[group == 'younger' & mask_index == 'EVC']$AminusB_avg_error_6)
+hist(data_clf_behav_diff[group == 'older' & mask_index == 'EVC']$AminusB_avg_error_6)
+```
+
+**log-transformed**
+
+```{r, out.width='20%'}
+hist(data_clf_behav_diff[group == 'younger' & mask_index == 'EVC']$logAminuslogB_avg_error_6)
+hist(data_clf_behav_diff[group == 'older' & mask_index == 'EVC']$logAminuslogB_avg_error_6)
+```
+
+##### KS tests {.tabset}
+
+**Not transformed**
+
+```{r}
+ks_data = data_clf_behav_diff[group == 'younger' & mask_index == 'EVC']$AminusB_avg_error_6
+ks.test(ks_data, 'pnorm', mean(ks_data), sd(ks_data))
+
+ks_data = data_clf_behav_diff[group == 'older' & mask_index == 'EVC']$AminusB_avg_error_6
+ks.test(ks_data, 'pnorm', mean(ks_data), sd(ks_data))
+```
+
+**log-transformed**
+
+```{r}
+ks_data = data_clf_behav_diff[group == 'younger' & mask_index == 'EVC']$logAminuslogB_avg_error_6
+ks.test(ks_data, 'pnorm', mean(ks_data), sd(ks_data))
+
+ks_data = data_clf_behav_diff[group == 'older' & mask_index == 'EVC']$logAminuslogB_avg_error_6
+ks.test(ks_data, 'pnorm', mean(ks_data), sd(ks_data))
+```
+
+### Individual models (LMs) {.tabset}
+
+#### EVC (LM)
+
+```{r}
+m1 = lm(AminusB_clf ~ logAminuslogB_avg_error_6 * group * session_plan,
+        data = subset(data_clf_behav_diff, mask_index == 'EVC'))
+Anova(m1)
+```
+
+```{r}
+emtrends(m1, pairwise ~ group, var = 'logAminuslogB_avg_error_6')
+joint_tests(m1, by = c('group'))
+```
+
+#### RSC (LM)
+
+```{r}
+m1 = lm(AminusB_clf ~ logAminuslogB_avg_error_6 * group * session_plan,
+        data = subset(data_clf_behav_diff, mask_index == 'Isthmus Cing. (RSC)'))
+prettify(Anova(m1))
+```
+
+#### HC (LM)
+
+```{r}
+m1 = lm(AminusB_clf ~ logAminuslogB_avg_error_6 * group * session_plan,
+        data = subset(data_clf_behav_diff, mask_index == 'HC'))
+prettify(Anova(m1))
+```
+
+
+
