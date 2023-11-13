@@ -4,9 +4,6 @@
 
 Repository and documentation for DAMSON project in cooperation with Christian Baeuchl, Franka Gloeckner, Philipp Riedel, Johannes Petzold, Michael Smolka, Shu-Chen Li, and Nicolas Schuck.
 
-The documentation website to the project can be found
-[here](https://koch.mpib.berlin/damson/).
-
 For information on the pipelines see ```.../documentation/docs/...```, specifically ```pipeline_preprocessing.md``` and ```pipeline_analysis.md```.
 
 # File structure with description
